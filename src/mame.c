@@ -501,7 +501,7 @@ void pause_action_start_emulator(void)
   cpu_run();
 }
 
-void run_machine_core_done(void)
+void mame_save_nvram(void)
 {
     /* save the NVRAM */
     if (Machine->drv->nvram_handler)
@@ -513,6 +513,11 @@ void run_machine_core_done(void)
             mame_fclose(nvram_file);
         }
     }
+}
+
+void run_machine_core_done(void)
+{
+    mame_save_nvram();
 
     StopCheat();
 
