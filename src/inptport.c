@@ -993,7 +993,9 @@ void update_analog_port(int port)
 		*/
 
 
-		if (lightgun_delta_axis[player][X_AXIS] || lightgun_delta_axis[player][Y_AXIS])
+		/* Zero on both absolute axes is the center of the screen. */
+		if (lightgun_delta_axis[player][X_AXIS] || lightgun_delta_axis[player][Y_AXIS]
+			|| options.xy_device == RETRO_DEVICE_POINTER || options.xy_device == RETRO_DEVICE_LIGHTGUN)
 		{
 			if (axis == X_AXIS)
 			{
@@ -1014,6 +1016,11 @@ void update_analog_port(int port)
 		{
 			/* this must unset what the above could have set if port isint active to switch xy devices with working scaling */
 			input_analog_scale[port]=1;
+			if (analogjoy_input[player][axis] == CODE_NONE)
+			{
+				analog_current_axis[player][axis] = 0;
+				analog_previous_axis[player][axis] = 0;
+			}
 		}
 	}
 
@@ -1043,7 +1050,8 @@ void update_analog_port(int port)
 		new  = analog_current_axis[player][axis];
 		prev = analog_previous_axis[player][axis];
 
-		if ((new != 0) || (new-prev != 0))
+		if ((new != 0) || (new-prev != 0)
+			|| (is_gun && (options.xy_device == RETRO_DEVICE_POINTER || options.xy_device == RETRO_DEVICE_LIGHTGUN)))
 		{
 			delta=0;
 
