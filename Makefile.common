@@ -291,6 +291,7 @@ SOURCES_C += \
 	$(CORE_DIR)/machine/acitya.c \
 	$(CORE_DIR)/drivers/jrpacman.c \
 	$(CORE_DIR)/vidhrdw/pacman_vidhrdw.c \
+	$(CORE_DIR)/drivers/beena.c \
 	$(CORE_DIR)/drivers/pengo.c \
 	$(CORE_DIR)/drivers/epos.c \
 	$(CORE_DIR)/vidhrdw/epos_vidhrdw.c \
