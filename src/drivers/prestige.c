@@ -35,7 +35,6 @@
 ***************************************************************************/
 
 #include "driver.h"
-#include "cpu/z80/z80.h"
 #include "vidhrdw/generic.h"
 
 /* ----------------------------------------------------------------------- */
@@ -57,6 +56,21 @@ static data8_t *prestige_bank3_base;	/* current bank3 target (0x8000-0xbfff) */
 
 static UINT8 prestige_kb_matrix;
 static UINT8 prestige_irq_counter;
+
+/* Auto-boot through the base firmware's launcher, after its initialization.
+   Redirect the launcher before it dispatches any button or keyboard events
+   to its normal cartridge launch routine. The old idle-branch patch at 0x435a
+   ran after the button queue at 0x4330: a held Enter/Space/End could take the
+   select branch at 0x433b straight to a built-in app without reaching it.
+   That routine reads the entry point from the cartridge header and uses the
+   firmware's bank trampoline. Only the in-memory base ROM is patched.
+
+   Do not jump into the cartridge from a host timer: doing so interrupts the
+   firmware with an unfinished stack/bank context. In particular, the former
+   frame-24 jump made Conan 3 skip its intro and title even with no input.
+   Let the console finish booting before this launcher branch is reached. */
+#define PRESTIGE_CART_ROM_PATCH   0x4330
+#define PRESTIGE_CART_ROM_LAUNCH  0x42eb
 
 static UINT16 lcd_addr1;
 static UINT16 lcd_addr2;
@@ -465,7 +479,15 @@ static MACHINE_INIT( prestige )
 	if (memory_region_length(REGION_CPU1) > 0x080000)
 		memset(prestige_base + 0x080000, 0x00, memory_region_length(REGION_CPU1) - 0x080000);
 
-	/* The firmware polls some unmapped ports (e.g. 0x10, 0x20) waiting for
+	/* Replace ld hl,$e0ee before either launcher input queue is inspected.
+	   All console/menu initialization still runs, and queued or held input
+	   cannot divert execution to a built-in app. This is an emulator-side
+	   patch of the writable ROM image only. */
+	prestige_base[PRESTIGE_CART_ROM_PATCH + 0] = 0xc3;			/* jp 0x42eb */
+	prestige_base[PRESTIGE_CART_ROM_PATCH + 1] = PRESTIGE_CART_ROM_LAUNCH & 0xff;
+	prestige_base[PRESTIGE_CART_ROM_PATCH + 2] = PRESTIGE_CART_ROM_LAUNCH >> 8;
+
+	/* The firmware polls some unmapped ports (e.g. 0x20) waiting for
 	   bits to be set; upstream MAME uses unmap_value_high() so those reads
 	   return 0xff. Match that behaviour. */
 	memory_set_unmap_value(0xff);
@@ -496,6 +518,7 @@ static MACHINE_INIT( prestige )
 
 	cpu_set_irq_callback(0, prestige_int_ack);
 	timer_set(1.0 / 200.0, 0, prestige_irq_timer);
+
 }
 
 static MACHINE_DRIVER_START( prestige )
