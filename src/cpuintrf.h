@@ -305,6 +305,12 @@ enum
 #if (HAS_ARM7)
 	CPU_ARM7,
 #endif
+#if (HAS_ARM7BE)
+	CPU_ARM7BE,
+#endif
+#if (HAS_ARM7LE)
+	CPU_ARM7LE,
+#endif
 #if (HAS_SH2)
 	CPU_SH2,
 #endif

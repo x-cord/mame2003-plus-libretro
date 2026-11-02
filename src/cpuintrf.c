@@ -181,6 +181,12 @@
 #if (HAS_ARM7)
 #include "cpu/arm7/arm7.h"
 #endif
+#if (HAS_ARM7BE)
+#include "cpu/arm7be/arm7be.h"
+#endif
+#if (HAS_ARM7LE)
+#include "cpu/arm7be/arm7le.h"
+#endif
 #if (HAS_SH2)
 #include "cpu/sh2/sh2.h"
 #endif
@@ -656,6 +662,12 @@ const struct cpu_interface cpuintrf[] =
 #endif
 #if (HAS_ARM7)
 	CPU0(ARM7,	   arm7, 	 5,  0,1.00,32,32ledw, 0,32,LE,2, 4	),
+#endif
+#if (HAS_ARM7BE)
+	CPU0(ARM7BE,  arm7be, 	 5,  0,1.00,32,32bedw, 0,32,BE,4, 4	),
+#endif
+#if (HAS_ARM7LE)
+	CPU0(ARM7LE,  arm7le, 	 5,  0,1.00,32,32ledw, 0,32,LE,4, 4	),
 #endif
 #if (HAS_SH2)
 	CPU4(SH2,	   sh2, 	16,  0,1.00,32,32bedw,   0,32,BE,2, 2  ),

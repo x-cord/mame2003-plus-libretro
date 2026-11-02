@@ -194,6 +194,8 @@ CPUS+=UPD7810@
 CPUS+=UPD7807@
 CPUS+=ARM@
 CPUS+=ARM7@
+CPUS+=ARM7BE@
+CPUS+=ARM7LE@
 CPUS+=JAGUAR@
 CPUS+=R3000@
 CPUS+=R4600@
@@ -2042,6 +2044,24 @@ CPUDEFS += -DHAS_ARM7=1
 SOURCES_C += $(CORE_DIR)/cpu/arm7/arm7.c
 else
 CPUDEFS += -DHAS_ARM7=0
+endif
+
+CPU=$(strip $(findstring ARM7BE@,$(CPUS)))
+ifneq ($(CPU),)
+OBJDIRS += $(CORE_DIR)/cpu/arm7be
+CPUDEFS += -DHAS_ARM7BE=1
+SOURCES_C += $(CORE_DIR)/cpu/arm7be/arm7be.c
+else
+CPUDEFS += -DHAS_ARM7BE=0
+endif
+
+CPU=$(strip $(findstring ARM7LE@,$(CPUS)))
+ifneq ($(CPU),)
+OBJDIRS += $(CORE_DIR)/cpu/arm7be
+CPUDEFS += -DHAS_ARM7LE=1
+SOURCES_C += $(CORE_DIR)/cpu/arm7be/arm7le.c
+else
+CPUDEFS += -DHAS_ARM7LE=0
 endif
 
 CPU=$(strip $(findstring JAGUAR@,$(CPUS)))
