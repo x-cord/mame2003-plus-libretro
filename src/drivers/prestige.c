@@ -37,6 +37,7 @@
 
 #include "driver.h"
 #include "state.h"
+#include "sound/tms5220.h"
 #include "vidhrdw/generic.h"
 #include <math.h>
 
@@ -71,9 +72,12 @@ static UINT8 prestige_irq_counter;
    Do not jump into the cartridge from a host timer: doing so interrupts the
    firmware with an unfinished stack/bank context. In particular, the former
    frame-24 jump made Conan 3 skip its intro and title even with no input.
-   Let the console finish booting before this launcher branch is reached. */
+   Let the console finish booting before this launcher branch is reached.
+   The menu prompt uses the firmware's synchronous phrase routine, so both
+   words finish before the launcher transfers control to the cartridge. */
 #define PRESTIGE_CART_ROM_PATCH   0x4330
 #define PRESTIGE_CART_ROM_LAUNCH  0x42eb
+#define PRESTIGE_MENU_SPEECH_CALL 0x431a
 
 static UINT16 lcd_addr1;
 static UINT16 lcd_addr2;
@@ -90,22 +94,31 @@ static int rel_offset(offs_t offset, offs_t base)
 }
 
 /*
- * Provisional Super Note Club tone channel. The firmware writes command 2/6
+ * Super Note Club speech and tone channel. The firmware writes command 2/6
  * while the transfer gate is closed, then supplies a little-endian period
  * and an 8-bit duration through three NMI requests. Completion selects IM0
- * vector 0x20; advancing it at a fixed rate truncates the programmed notes.
+ * vector 0x20.
  *
- * The unidentified ASIC's waveform/sample format is not decoded. A pulse
- * oscillator and AC coupling approximate its tone output. The period clock
- * is estimated from the hardware recording; all pitches, lengths, rests and
- * pitch bends are supplied by the running firmware, with no music tables.
+ * Command 0/1 streams LPC speech (LSB-first bytes, 4-bit energy, repeat,
+ * 6-bit pitch, 5/5/4/4/4/4/4/3/3/3-bit reflection coefficients).
+ * Request bytes only while its FIFO accepts speech; a stop frame ends the
+ * transfer before its final synthesis frame has drained.
+ *
+ * The nominal speech rate is that clock / 16.
  */
 #define PRESTIGE_TONE_CLOCK 163840.0
+#define PRESTIGE_SPEECH_RATE (PRESTIGE_TONE_CLOCK / 16.0)
+#define PRESTIGE_SPEECH_GAIN 1.4125375446227544 /* +3 dB, relative to tones */
 #define PRESTIGE_TONE_TICK (1.0 / 50.0)
 #define PRESTIGE_TRANSFER_TIME TIME_IN_USEC(100)
 
 static int prestige_sound_stream = -1;
 static UINT8 prestige_sound_control;
+static int prestige_speech_active;
+static int prestige_speech_started;
+static double prestige_speech_phase;
+static INT16 prestige_speech_sample;
+static INT16 prestige_speech_previous;
 static int prestige_sound_header;
 static UINT8 prestige_sound_parameters[3];
 static int prestige_sound_busy;
@@ -154,7 +167,19 @@ static void prestige_sound_update(int param, INT16 *buffer, int length)
 		double envelope = 0;
 		double input = 0;
 
-		if (prestige_sound_busy && prestige_sound_period)
+		if (prestige_speech_active)
+		{
+			prestige_speech_phase += PRESTIGE_SPEECH_RATE / rate;
+			while (prestige_speech_phase >= 1)
+			{
+				prestige_speech_phase -= 1;
+				prestige_speech_previous = prestige_speech_sample;
+				tms5220_process(&prestige_speech_sample, 1);
+			}
+			input = PRESTIGE_SPEECH_GAIN * (prestige_speech_previous +
+				(prestige_speech_sample - prestige_speech_previous) * prestige_speech_phase);
+		}
+		else if (prestige_sound_busy && prestige_sound_period)
 		{
 			double remaining = prestige_sound_duration - prestige_sound_age;
 			double edge_phase = prestige_sound_phase + 0.875;
@@ -170,7 +195,8 @@ static void prestige_sound_update(int param, INT16 *buffer, int length)
 		}
 		prestige_sound_output = highpass * (prestige_sound_output + input - prestige_sound_input);
 		prestige_sound_input = input;
-		*buffer++ = (INT16)prestige_sound_output;
+		*buffer++ = (INT16)(prestige_sound_output > 32767 ? 32767 :
+			(prestige_sound_output < -32768 ? -32768 : prestige_sound_output));
 		prestige_sound_phase += step;
 		if (prestige_sound_phase >= 1.0)
 			prestige_sound_phase -= 1.0;
@@ -180,7 +206,26 @@ static void prestige_sound_update(int param, INT16 *buffer, int length)
 
 static void prestige_sound_request(int param)
 {
-	if ((prestige_sound_control & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+	if (prestige_speech_active)
+	{
+		int status;
+		prestige_sound_sync();
+		status = tms5220_status_read();
+		if (status & 0x80) prestige_speech_started = 1;
+		else if (prestige_speech_started)
+		{
+			prestige_speech_active = 0;
+			prestige_sound_busy = 0;
+			prestige_sound_irq = 1;
+			return;
+		}
+		if (!tms5220_speak_external_read() || !tms5220_ready_read())
+		{
+			timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
+			return;
+		}
+	}
+	if ((prestige_sound_control & 4) && (prestige_speech_active || (prestige_sound_header >= 0 && prestige_sound_header < 3)))
 		cpu_set_nmi_line(0, PULSE_LINE);
 }
 
@@ -188,6 +233,7 @@ static void prestige_sound_end(int param)
 {
 	prestige_sound_sync();
 	prestige_sound_busy = 0;
+	prestige_speech_active = 0;
 	prestige_sound_irq = 1;
 }
 
@@ -195,17 +241,30 @@ static void prestige_sound_postload(void)
 {
 	timer_adjust(prestige_sound_request_timer, TIME_NEVER, 0, 0);
 	timer_adjust(prestige_sound_end_timer, TIME_NEVER, 0, 0);
-	if (prestige_sound_busy)
+	if (prestige_speech_active && (prestige_sound_control & 4))
+		timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
+	else if (prestige_sound_busy)
 	{
 		double remaining = prestige_sound_duration - prestige_sound_age;
 		timer_adjust(prestige_sound_end_timer, remaining > 0 ? remaining : TIME_NOW, 0, 0);
 	}
-	else if ((prestige_sound_control & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+	else if ((prestige_sound_control & 4) && (prestige_speech_active || (prestige_sound_header >= 0 && prestige_sound_header < 3)))
 		timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
 }
 
 static int prestige_sound_start(const struct MachineSound *msound)
 {
+	tms5220_set_irq(NULL);
+	tms5220_set_read(NULL);
+	tms5220_set_load_address(NULL);
+	tms5220_set_read_and_branch(NULL);
+	tms5220_set_variant(variant_tms5220);
+	tms5220_register_state();
+	state_save_register_int("prestige_sound", 0, "speech_active", &prestige_speech_active);
+	state_save_register_int("prestige_sound", 0, "speech_started", &prestige_speech_started);
+	state_save_register_double("prestige_sound", 0, "speech_phase", &prestige_speech_phase, 1);
+	state_save_register_INT16("prestige_sound", 0, "speech_sample", &prestige_speech_sample, 1);
+	state_save_register_INT16("prestige_sound", 0, "speech_previous", &prestige_speech_previous, 1);
 	state_save_register_UINT8("prestige_sound", 0, "control", &prestige_sound_control, 1);
 	state_save_register_UINT8("prestige_sound", 0, "parameters", prestige_sound_parameters, 3);
 	state_save_register_int("prestige_sound", 0, "header", &prestige_sound_header);
@@ -223,7 +282,7 @@ static int prestige_sound_start(const struct MachineSound *msound)
 	prestige_sound_stream = -1;
 	if (!Machine->sample_rate)
 		return 0;
-	prestige_sound_stream = stream_init("Prestige tone", 50, Machine->sample_rate, 0, prestige_sound_update);
+	prestige_sound_stream = stream_init("Prestige speech/tone", 50, Machine->sample_rate, 0, prestige_sound_update);
 	return prestige_sound_stream < 0;
 }
 
@@ -241,7 +300,7 @@ static WRITE_HANDLER( prestige_sound_control_w )
 	prestige_sound_control = data;
 	if (data & 4)
 	{
-		if (!(old & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+		if (!(old & 4) && (prestige_speech_active || (prestige_sound_header >= 0 && prestige_sound_header < 3)))
 			timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
 	}
 	else
@@ -258,7 +317,26 @@ static WRITE_HANDLER( prestige_sound_data_w )
 	{
 		/* Bit 0 selects the stream source; commands 2/6 share the tone header. */
 		int command = data & 0xfe;
+		prestige_sound_sync();
+		prestige_speech_active = command == 0;
+		if (prestige_speech_active)
+		{
+			prestige_sound_busy = 1;
+			prestige_sound_period = 0;
+			prestige_speech_started = 0;
+			prestige_speech_phase = 0;
+			prestige_speech_sample = prestige_speech_previous = 0;
+			tms5220_reset();
+			tms5220_data_write(0x60);
+		}
 		prestige_sound_header = command == 2 || command == 6 ? 0 : -1;
+		return;
+	}
+	if (prestige_speech_active)
+	{
+		prestige_sound_sync();
+		tms5220_data_write(data);
+		timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
 		return;
 	}
 	if (prestige_sound_header >= 0 && prestige_sound_header < 3)
@@ -665,6 +743,10 @@ static MACHINE_INIT( prestige )
 	int i;
 
 	prestige_sound_control = 0;
+	prestige_speech_active = prestige_speech_started = 0;
+	prestige_speech_phase = 0;
+	prestige_speech_sample = prestige_speech_previous = 0;
+	tms5220_reset();
 	prestige_sound_header = -1;
 	memset(prestige_sound_parameters, 0, sizeof(prestige_sound_parameters));
 	prestige_sound_busy = 0;
@@ -684,20 +766,19 @@ static MACHINE_INIT( prestige )
 
 	memset(prestige_ram, 0x00, PRESTIGE_RAM_SIZE);
 
-	/* Modern MAME zero-fills the unused tail of a ROM region; 0.78 does not.
-	   The base unit ROM is 512K but the region is 1M, and the firmware can
-	   bank the upper half into the address space (mask 0x3f).  Without this
-	   the CPU executes garbage there.  Match upstream and zero it. */
-	if (memory_region_length(REGION_CPU1) > 0x080000)
-		memset(prestige_base + 0x080000, 0x00, memory_region_length(REGION_CPU1) - 0x080000);
-
 	/* Replace ld hl,$e0ee before either launcher input queue is inspected.
 	   All console/menu initialization still runs, and queued or held input
 	   cannot divert execution to a built-in app. This is an emulator-side
-	   patch of the writable ROM image only. */
-	prestige_base[PRESTIGE_CART_ROM_PATCH + 0] = 0xc3;			/* jp 0x42eb */
-	prestige_base[PRESTIGE_CART_ROM_PATCH + 1] = PRESTIGE_CART_ROM_LAUNCH & 0xff;
-	prestige_base[PRESTIGE_CART_ROM_PATCH + 2] = PRESTIGE_CART_ROM_LAUNCH >> 8;
+	   patch of the writable ROM image only. The µ BIOS has a different
+	   launcher: never apply these original-BIOS addresses to it. */
+	if (strncmp(Machine->gamedrv->name, "snotecu_", 8))
+	{
+		/* call $01f2 waits for the whole phrase; $01ef starts it asynchronously. */
+		prestige_base[PRESTIGE_MENU_SPEECH_CALL + 1] = 0xf2;
+		prestige_base[PRESTIGE_CART_ROM_PATCH + 0] = 0xc3;			/* jp 0x42eb */
+		prestige_base[PRESTIGE_CART_ROM_PATCH + 1] = PRESTIGE_CART_ROM_LAUNCH & 0xff;
+		prestige_base[PRESTIGE_CART_ROM_PATCH + 2] = PRESTIGE_CART_ROM_LAUNCH >> 8;
+	}
 
 	/* The firmware polls some unmapped ports (e.g. 0x20) waiting for
 	   bits to be set; upstream MAME uses unmap_value_high() so those reads
@@ -769,29 +850,54 @@ MACHINE_DRIVER_END
 /* ----------------------------------------------------------------------- */
 /* ROMs                                                                    */
 /*                                                                         */
-/* Each ROM set contains the base unit ROM (27-5616-01.u6, Super Note Club)*/
+/* Each ROM set contains the original or µ base unit ROM                 */
 /* followed by the cartridge ROM.                                          */
 /* ----------------------------------------------------------------------- */
 
+/* Keep the original 512K BIOS tail zeroed without clearing the µ BIOS. */
 #define PRESTIGE_BASE_ROM \
 	ROM_LOAD( "27-5616-01.u6", 0x000000, 0x080000, CRC(74093f5b) SHA1(3495b07e297315051888261d608680513a05c08b) )
 
+#define PRESTIGE_MU_BASE_ROM \
+	ROM_LOAD( "27-6100-00.u1", 0, 0x100000, CRC(b2f979d5) SHA1(d2a76e99351971d1fb4cf4df9fe5741a606eb844) )
+
+ROM_START( snotecu_conan )
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )
+	PRESTIGE_MU_BASE_ROM
+	ROM_REGION( 0x080000, REGION_CPU2, 0 )
+	ROM_LOAD( "LH532KV6.IC1", 0, 0x040000, CRC(edf3cc1e) SHA1(0b759ff7dd2bd6809e5634679f758de106fed654) )
+ROM_END
+
+ROM_START( snotecu_conan2 )
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )
+	PRESTIGE_MU_BASE_ROM
+	ROM_REGION( 0x080000, REGION_CPU2, 0 )
+	ROM_LOAD( "SNC_Conan2.ic", 0, 0x040000, CRC(47a3ce5e) SHA1(2f9653ef01026d8a8f8c3036bda533336ebc7e0a) )
+ROM_END
+
+ROM_START( snotecu_conan3 )
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )
+	PRESTIGE_MU_BASE_ROM
+	ROM_REGION( 0x080000, REGION_CPU2, 0 )
+	ROM_LOAD( "SNC-CONAN3.IC1", 0, 0x080000, CRC(f93d6149) SHA1(b624db8fd47cae79357de4d60d41d88ebe1f089d) )
+ROM_END
+
 ROM_START( snotec_conan )
-	ROM_REGION( 0x100000, REGION_CPU1, 0 )	/* base unit ROM */
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )	/* base unit ROM */
 	PRESTIGE_BASE_ROM
 	ROM_REGION( 0x080000, REGION_CPU2, 0 )	/* cartridge ROM */
 	ROM_LOAD( "LH532KV6.IC1", 0x000000, 0x040000, CRC(edf3cc1e) SHA1(0b759ff7dd2bd6809e5634679f758de106fed654) )
 ROM_END
 
 ROM_START( snotec_conan2 )
-	ROM_REGION( 0x100000, REGION_CPU1, 0 )
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )
 	PRESTIGE_BASE_ROM
 	ROM_REGION( 0x080000, REGION_CPU2, 0 )
 	ROM_LOAD( "SNC_Conan2.ic", 0x000000, 0x040000, CRC(47a3ce5e) SHA1(2f9653ef01026d8a8f8c3036bda533336ebc7e0a) )
 ROM_END
 
 ROM_START( snotec_conan3 )
-	ROM_REGION( 0x100000, REGION_CPU1, 0 )
+	ROM_REGION( 0x100000, REGION_CPU1, ROMREGION_ERASE00 )
 	PRESTIGE_BASE_ROM
 	ROM_REGION( 0x080000, REGION_CPU2, 0 )
 	ROM_LOAD( "SNC-CONAN3.IC1", 0x000000, 0x080000, CRC(f93d6149) SHA1(b624db8fd47cae79357de4d60d41d88ebe1f089d) )
@@ -804,3 +910,7 @@ ROM_END
 GAMEX( 1996, snotec_conan,  0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan", GAME_IMPERFECT_SOUND )
 GAMEX( 1996, snotec_conan2, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 2", GAME_IMPERFECT_SOUND )
 GAMEX( 1999, snotec_conan3, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 3", GAME_IMPERFECT_SOUND )
+
+GAMEX( 1998, snotecu_conan, snotec_conan, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club µ - Detective Conan", GAME_IMPERFECT_SOUND )
+GAMEX( 1998, snotecu_conan2, snotec_conan2, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club µ - Detective Conan Episode 2", GAME_IMPERFECT_SOUND )
+GAMEX( 1998, snotecu_conan3, snotec_conan3, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club µ - Detective Conan Episode 3", GAME_IMPERFECT_SOUND )

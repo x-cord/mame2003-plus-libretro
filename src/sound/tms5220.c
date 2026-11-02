@@ -13,6 +13,7 @@
 #include <math.h>
 
 #include "driver.h"
+#include "state.h"
 #include "tms5220.h"
 
 
@@ -124,6 +125,51 @@ static int RDB_flag;					/* whether we should read data register or status regis
 computer.  The exact relationship of this chip with tms5200 & tms5220 is
 unknown, but it seems to use slightly different tables for LPC parameters. */
 static tms5220_variant variant;
+
+/* The streamed-speech host must stop requesting bytes as soon as the stop
+ * frame is parsed, while talk_status remains active for the final frame. */
+int tms5220_speak_external_read(void)
+{
+    return speak_external;
+}
+
+void tms5220_register_state(void)
+{
+    state_save_register_UINT8("tms5220", 0, "fifo_head", &fifo_head, 1);
+    state_save_register_UINT8("tms5220", 0, "fifo_tail", &fifo_tail, 1);
+    state_save_register_UINT8("tms5220", 0, "fifo_count", &fifo_count, 1);
+    state_save_register_UINT8("tms5220", 0, "fifo_bits_taken", &fifo_bits_taken, 1);
+    state_save_register_UINT8("tms5220", 0, "tms5220_speaking", &tms5220_speaking, 1);
+    state_save_register_UINT8("tms5220", 0, "speak_external", &speak_external, 1);
+    state_save_register_UINT8("tms5220", 0, "talk_status", &talk_status, 1);
+    state_save_register_UINT8("tms5220", 0, "first_frame", &first_frame, 1);
+    state_save_register_UINT8("tms5220", 0, "last_frame", &last_frame, 1);
+    state_save_register_UINT8("tms5220", 0, "buffer_low", &buffer_low, 1);
+    state_save_register_UINT8("tms5220", 0, "buffer_empty", &buffer_empty, 1);
+    state_save_register_UINT8("tms5220", 0, "irq_pin", &irq_pin, 1);
+    state_save_register_UINT8("tms5220", 0, "interp_count", &interp_count, 1);
+    state_save_register_UINT8("tms5220", 0, "sample_count", &sample_count, 1);
+    state_save_register_UINT8("tms5220", 0, "data_register", &data_register, 1);
+    state_save_register_UINT16("tms5220", 0, "old_energy", &old_energy, 1);
+    state_save_register_UINT16("tms5220", 0, "old_pitch", &old_pitch, 1);
+    state_save_register_UINT16("tms5220", 0, "new_energy", &new_energy, 1);
+    state_save_register_UINT16("tms5220", 0, "new_pitch", &new_pitch, 1);
+    state_save_register_UINT16("tms5220", 0, "current_energy", &current_energy, 1);
+    state_save_register_UINT16("tms5220", 0, "current_pitch", &current_pitch, 1);
+    state_save_register_UINT16("tms5220", 0, "target_energy", &target_energy, 1);
+    state_save_register_UINT16("tms5220", 0, "target_pitch", &target_pitch, 1);
+    state_save_register_INT8("tms5220", 0, "randbit", &randbit, 1);
+    state_save_register_UINT8("tms5220", 0, "fifo", fifo, FIFO_SIZE);
+    state_save_register_int("tms5220", 0, "pitch_count", &pitch_count);
+    state_save_register_int("tms5220", 0, "schedule_dummy_read", &schedule_dummy_read);
+    state_save_register_int("tms5220", 0, "RDB_flag", &RDB_flag);
+    state_save_register_INT32("tms5220", 0, "old_k", old_k, 10);
+    state_save_register_INT32("tms5220", 0, "new_k", new_k, 10);
+    state_save_register_INT32("tms5220", 0, "current_k", current_k, 10);
+    state_save_register_INT32("tms5220", 0, "target_k", target_k, 10);
+    state_save_register_INT32("tms5220", 0, "u", u, 11);
+    state_save_register_INT32("tms5220", 0, "x", x, 10);
+}
 
 /**********************************************************************************************
 

@@ -2,6 +2,8 @@
 #define tms5220_h
 
 void tms5220_reset(void);
+void tms5220_register_state(void);
+int tms5220_speak_external_read(void);
 void tms5220_set_irq(void (*func)(int));
 
 void tms5220_data_write(int data);
