@@ -78,6 +78,8 @@ enum { IPT_END=1,IPT_PORT,
 	IPT_EXTENSION,	/* this is an extension on the previous InputPort, not a real inputport. */
 					/* It is used to store additional parameters for analog inputs */
 
+	IPT_KEYBOARD,	/* keyboard key (code supplied via PORT_CODE/PORT_BITX) */
+
 	/* the following are special codes for user interface handling - not to be used by drivers! */
 	IPT_UI_CONFIGURE,
 	IPT_UI_ON_SCREEN_DISPLAY,
