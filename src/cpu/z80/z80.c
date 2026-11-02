@@ -66,6 +66,7 @@ typedef struct {
 	UINT8	int_state[Z80_MAXDAISY];
 	Z80_DaisyChain irq[Z80_MAXDAISY];
 	int		(*irq_callback)(int irqline);
+	int		extra_cycles;		/* extra cycles for interrupts */
 } Z80_Regs;
 
 static Z80_Regs Z80;
@@ -4966,7 +4967,8 @@ void z80_exit(void)
  ****************************************************************************/
 int z80_execute(int cycles)
 {
-	z80_ICount = cycles;
+	z80_ICount = cycles - Z80.extra_cycles;
+	Z80.extra_cycles = 0;
 
 	/* check for NMIs on the way in */
 	if (m_nmi_pending)
@@ -5006,6 +5008,9 @@ int z80_execute(int cycles)
 		m_r++;
 		EXEC(op,rop());
 	} while (z80_ICount > 0);
+
+	z80_ICount -= Z80.extra_cycles;
+	Z80.extra_cycles = 0;
 
 	return cycles - z80_ICount;
 }
