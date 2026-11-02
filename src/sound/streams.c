@@ -302,3 +302,18 @@ void stream_update(int channel,int min_interval)
 		}
 	}
 }
+
+/* Allows a stream to change its generation rate at runtime, mirroring the
+   modern MAME sound_stream::set_sample_rate() used by drivers whose source
+   clock is software-selectable (e.g. the Sega Beena AP2010PCM). */
+void stream_set_sample_rate(int channel,int sample_rate)
+{
+	if (channel < 0 || channel >= MIXER_MAX_CHANNELS)
+		return;
+
+	stream_sample_rate[channel] = sample_rate;
+	if (sample_rate)
+		stream_sample_length[channel] = 1000000 / sample_rate;
+	else
+		stream_sample_length[channel] = 0;
+}
