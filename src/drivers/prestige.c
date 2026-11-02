@@ -27,6 +27,7 @@
 
     I/O:
         0x04-0x05  mouse
+        0x10-0x11  sound transfer control/data
         0x30-0x3f  LCD controller
         0x40       keyboard matrix select
         0x41-0x42  keyboard matrix data
@@ -35,7 +36,9 @@
 ***************************************************************************/
 
 #include "driver.h"
+#include "state.h"
 #include "vidhrdw/generic.h"
+#include <math.h>
 
 /* ----------------------------------------------------------------------- */
 /* machine state                                                           */
@@ -84,6 +87,196 @@ static UINT8  lcd_split_pos;
 static int rel_offset(offs_t offset, offs_t base)
 {
 	return (offset >= base) ? (offset - base) : (int)offset;
+}
+
+/*
+ * Provisional Super Note Club tone channel. The firmware writes command 2/6
+ * while the transfer gate is closed, then supplies a little-endian period
+ * and an 8-bit duration through three NMI requests. Completion selects IM0
+ * vector 0x20; advancing it at a fixed rate truncates the programmed notes.
+ *
+ * The unidentified ASIC's waveform/sample format is not decoded. A pulse
+ * oscillator and AC coupling approximate its tone output. The period clock
+ * is estimated from the hardware recording; all pitches, lengths, rests and
+ * pitch bends are supplied by the running firmware, with no music tables.
+ */
+#define PRESTIGE_TONE_CLOCK 163840.0
+#define PRESTIGE_TONE_TICK (1.0 / 50.0)
+#define PRESTIGE_TRANSFER_TIME TIME_IN_USEC(100)
+
+static int prestige_sound_stream = -1;
+static UINT8 prestige_sound_control;
+static int prestige_sound_header;
+static UINT8 prestige_sound_parameters[3];
+static int prestige_sound_busy;
+static int prestige_sound_irq;
+static UINT16 prestige_sound_period;
+static double prestige_sound_phase;
+static double prestige_sound_input;
+static double prestige_sound_output;
+static double prestige_sound_age;
+static double prestige_sound_duration;
+static mame_timer *prestige_sound_request_timer;
+static mame_timer *prestige_sound_end_timer;
+
+static void prestige_sound_sync(void)
+{
+	if (prestige_sound_stream >= 0)
+		stream_update(prestige_sound_stream, 0);
+}
+
+/* Band limit each pulse edge at the current output sample rate. */
+static double prestige_sound_edge(double phase, double step)
+{
+	if (phase < step)
+	{
+		phase /= step;
+		return phase + phase - phase * phase - 1.0;
+	}
+	if (phase > 1.0 - step)
+	{
+		phase = (phase - 1.0) / step;
+		return phase * phase + phase + phase + 1.0;
+	}
+	return 0.0;
+}
+
+static void prestige_sound_update(int param, INT16 *buffer, int length)
+{
+	double rate = Machine->sample_rate;
+	double step = prestige_sound_period ? PRESTIGE_TONE_CLOCK / prestige_sound_period / rate : 0;
+	double highpass = exp(-2.0 * 3.141592653589793 * 200.0 / rate);
+
+	if (step > 0.45)
+		step = 0.45;
+	while (length--)
+	{
+		double envelope = 0;
+		double input = 0;
+
+		if (prestige_sound_busy && prestige_sound_period)
+		{
+			double remaining = prestige_sound_duration - prestige_sound_age;
+			double edge_phase = prestige_sound_phase + 0.875;
+			double pulse = prestige_sound_phase < 0.125 ? 0.875 : -0.125;
+
+			if (edge_phase >= 1.0)
+				edge_phase -= 1.0;
+			pulse += 0.5 * (prestige_sound_edge(prestige_sound_phase, step) - prestige_sound_edge(edge_phase, step));
+			envelope = prestige_sound_age < 0.002 ? prestige_sound_age / 0.002 : 1.0;
+			if (remaining < 0.010)
+				envelope *= remaining > 0 ? remaining / 0.010 : 0;
+			input = pulse * envelope * 12000.0;
+		}
+		prestige_sound_output = highpass * (prestige_sound_output + input - prestige_sound_input);
+		prestige_sound_input = input;
+		*buffer++ = (INT16)prestige_sound_output;
+		prestige_sound_phase += step;
+		if (prestige_sound_phase >= 1.0)
+			prestige_sound_phase -= 1.0;
+		prestige_sound_age += 1.0 / rate;
+	}
+}
+
+static void prestige_sound_request(int param)
+{
+	if ((prestige_sound_control & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+		cpu_set_nmi_line(0, PULSE_LINE);
+}
+
+static void prestige_sound_end(int param)
+{
+	prestige_sound_sync();
+	prestige_sound_busy = 0;
+	prestige_sound_irq = 1;
+}
+
+static void prestige_sound_postload(void)
+{
+	timer_adjust(prestige_sound_request_timer, TIME_NEVER, 0, 0);
+	timer_adjust(prestige_sound_end_timer, TIME_NEVER, 0, 0);
+	if (prestige_sound_busy)
+	{
+		double remaining = prestige_sound_duration - prestige_sound_age;
+		timer_adjust(prestige_sound_end_timer, remaining > 0 ? remaining : TIME_NOW, 0, 0);
+	}
+	else if ((prestige_sound_control & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+		timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
+}
+
+static int prestige_sound_start(const struct MachineSound *msound)
+{
+	state_save_register_UINT8("prestige_sound", 0, "control", &prestige_sound_control, 1);
+	state_save_register_UINT8("prestige_sound", 0, "parameters", prestige_sound_parameters, 3);
+	state_save_register_int("prestige_sound", 0, "header", &prestige_sound_header);
+	state_save_register_int("prestige_sound", 0, "busy", &prestige_sound_busy);
+	state_save_register_int("prestige_sound", 0, "irq", &prestige_sound_irq);
+	state_save_register_UINT16("prestige_sound", 0, "period", &prestige_sound_period, 1);
+	state_save_register_double("prestige_sound", 0, "phase", &prestige_sound_phase, 1);
+	state_save_register_double("prestige_sound", 0, "input", &prestige_sound_input, 1);
+	state_save_register_double("prestige_sound", 0, "output", &prestige_sound_output, 1);
+	state_save_register_double("prestige_sound", 0, "age", &prestige_sound_age, 1);
+	state_save_register_double("prestige_sound", 0, "duration", &prestige_sound_duration, 1);
+	state_save_register_func_presave(prestige_sound_sync);
+	state_save_register_func_postload(prestige_sound_postload);
+
+	prestige_sound_stream = -1;
+	if (!Machine->sample_rate)
+		return 0;
+	prestige_sound_stream = stream_init("Prestige tone", 50, Machine->sample_rate, 0, prestige_sound_update);
+	return prestige_sound_stream < 0;
+}
+
+static struct CustomSound_interface prestige_sound_interface = { prestige_sound_start, 0, 0 };
+
+static READ_HANDLER( prestige_sound_r )
+{
+	/* Transfer-ready and the latched write/auto-request gate. */
+	return 0xf9 | (prestige_sound_control & 4);
+}
+
+static WRITE_HANDLER( prestige_sound_control_w )
+{
+	int old = prestige_sound_control;
+	prestige_sound_control = data;
+	if (data & 4)
+	{
+		if (!(old & 4) && prestige_sound_header >= 0 && prestige_sound_header < 3)
+			timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
+	}
+	else
+	{
+		timer_adjust(prestige_sound_request_timer, TIME_NEVER, 0, 0);
+		if (prestige_sound_busy)
+			timer_adjust(prestige_sound_end_timer, TIME_NOW, 0, 0);
+	}
+}
+
+static WRITE_HANDLER( prestige_sound_data_w )
+{
+	if (!(prestige_sound_control & 4))
+	{
+		/* Bit 0 selects the stream source; commands 2/6 share the tone header. */
+		int command = data & 0xfe;
+		prestige_sound_header = command == 2 || command == 6 ? 0 : -1;
+		return;
+	}
+	if (prestige_sound_header >= 0 && prestige_sound_header < 3)
+	{
+		prestige_sound_parameters[prestige_sound_header++] = data;
+		if (prestige_sound_header < 3)
+			timer_adjust(prestige_sound_request_timer, PRESTIGE_TRANSFER_TIME, 0, 0);
+		else
+		{
+			prestige_sound_sync();
+			prestige_sound_period = prestige_sound_parameters[0] | (prestige_sound_parameters[1] << 8);
+			prestige_sound_phase = 0;
+			prestige_sound_age = 0;
+			prestige_sound_duration = (prestige_sound_parameters[2] ? prestige_sound_parameters[2] : 1) * PRESTIGE_TONE_TICK;
+			prestige_sound_busy = 1;
+			timer_adjust(prestige_sound_end_timer, prestige_sound_duration, 0, 0);
+		}
+	}
 }
 
 static READ_HANDLER( prestige_ram_r );
@@ -247,11 +440,14 @@ static MEMORY_WRITE_START( prestige_writemem )
 MEMORY_END
 
 static PORT_READ_START( prestige_readport )
+	{ 0x10, 0x10, prestige_sound_r },
 	{ 0x41, 0x42, kb_r },
 	{ 0x50, 0x56, bankswitch_r },
 PORT_END
 
 static PORT_WRITE_START( prestige_writeport )
+	{ 0x10, 0x10, prestige_sound_control_w },
+	{ 0x11, 0x11, prestige_sound_data_w },
 	{ 0x30, 0x3f, lcdc_w },
 	{ 0x40, 0x40, kb_w },
 	{ 0x50, 0x56, bankswitch_w },
@@ -437,14 +633,16 @@ static int prestige_int_ack(int irqline)
 
 	cpu_set_irq_line(0, 0, CLEAR_LINE);
 
-	if (prestige_irq_counter == 0x04)
+	/* Sound completion advances the next ROM note; busy tones keep their duration. */
+	if (prestige_sound_irq || (prestige_irq_counter == 0x04 && !prestige_sound_busy))
 	{
 		prestige_irq_counter = 0;
+		prestige_sound_irq = 0;
 		vector = 0x0020;
 	}
 	else
 	{
-		prestige_irq_counter++;
+		prestige_irq_counter = (prestige_irq_counter + 1) % 5;
 		vector = 0x0030;
 	}
 
@@ -465,6 +663,20 @@ static void prestige_irq_timer(int param)
 static MACHINE_INIT( prestige )
 {
 	int i;
+
+	prestige_sound_control = 0;
+	prestige_sound_header = -1;
+	memset(prestige_sound_parameters, 0, sizeof(prestige_sound_parameters));
+	prestige_sound_busy = 0;
+	prestige_sound_irq = 0;
+	prestige_sound_period = 0;
+	prestige_sound_phase = 0;
+	prestige_sound_age = 0;
+	prestige_sound_duration = 0;
+	prestige_sound_input = 0;
+	prestige_sound_output = 0;
+	prestige_sound_request_timer = timer_alloc(prestige_sound_request);
+	prestige_sound_end_timer = timer_alloc(prestige_sound_end);
 
 	prestige_ram  = auto_malloc(PRESTIGE_RAM_SIZE);
 	prestige_base = memory_region(REGION_CPU1);
@@ -550,7 +762,8 @@ static MACHINE_DRIVER_START( prestige )
 	MDRV_VIDEO_START(prestige)
 	MDRV_VIDEO_UPDATE(prestige)
 
-	/* sound hardware (none) */
+	/* sound hardware */
+	MDRV_SOUND_ADD(CUSTOM, prestige_sound_interface)
 MACHINE_DRIVER_END
 
 /* ----------------------------------------------------------------------- */
@@ -588,6 +801,6 @@ ROM_END
 /* game drivers                                                            */
 /* ----------------------------------------------------------------------- */
 
-GAMEX( 1996, snotec_conan,  0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan", GAME_NO_SOUND )
-GAMEX( 1996, snotec_conan2, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 2", GAME_NO_SOUND )
-GAMEX( 1999, snotec_conan3, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 3", GAME_NO_SOUND )
+GAMEX( 1996, snotec_conan,  0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan", GAME_IMPERFECT_SOUND )
+GAMEX( 1996, snotec_conan2, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 2", GAME_IMPERFECT_SOUND )
+GAMEX( 1999, snotec_conan3, 0, prestige, prestige, 0, ROT0, "Bandai", "Super Note Club - Detective Conan Episode 3", GAME_IMPERFECT_SOUND )
