@@ -4453,6 +4453,151 @@ OP(ed,ff) { illegal_2();                                     } /* DB   ED       
 
 
 /**********************************************************
+ * delay-loop shortcuts
+ **********************************************************/
+
+#define CHECK_BC_LOOP												\
+if( BC > 1 && PCD < 0xfffc ) {										\
+	UINT8 op1 = cpu_readop(PCD);									\
+	UINT8 op2 = cpu_readop(PCD+1);									\
+	if( (op1==0x78 && op2==0xb1) || (op1==0x79 && op2==0xb0) )		\
+	{																\
+		UINT8 op3 = cpu_readop(PCD+2);								\
+		UINT8 op4 = cpu_readop(PCD+3);								\
+		if( op3==0x20 && op4==0xfb )								\
+		{															\
+			int cnt =												\
+				m_cc_op[0x0b] +										\
+				m_cc_op[0x78] +										\
+				m_cc_op[0xb1] +										\
+				m_cc_op[0x20] +										\
+				m_cc_ex[0x20];										\
+			while( BC > 0 && z80_ICount > cnt )						\
+			{														\
+				z80_ICount -= cnt;									\
+				m_r += 4;											\
+				BC--;												\
+			}														\
+		}															\
+		else														\
+		if( op3 == 0xc2 )											\
+		{															\
+			UINT8 ad1 = cpu_readop_arg(PCD+3);						\
+			UINT8 ad2 = cpu_readop_arg(PCD+4);						\
+			if( (ad1 + 256 * ad2) == (PCD - 1) )					\
+			{														\
+				int cnt =											\
+					m_cc_op[0x0b] +									\
+					m_cc_op[0x78] +									\
+					m_cc_op[0xb1] +									\
+					m_cc_op[0xc2] +									\
+					m_cc_ex[0xc2];									\
+				while( BC > 0 && z80_ICount > cnt )					\
+				{													\
+					z80_ICount -= cnt;								\
+					m_r += 4;										\
+					BC--;											\
+				}													\
+			}														\
+		}															\
+	}																\
+}
+
+#define CHECK_DE_LOOP												\
+if( DE > 1 && PCD < 0xfffc ) {										\
+	UINT8 op1 = cpu_readop(PCD);									\
+	UINT8 op2 = cpu_readop(PCD+1);									\
+	if( (op1==0x7a && op2==0xb3) || (op1==0x7b && op2==0xb2) )		\
+	{																\
+		UINT8 op3 = cpu_readop(PCD+2);								\
+		UINT8 op4 = cpu_readop(PCD+3);								\
+		if( op3==0x20 && op4==0xfb )								\
+		{															\
+			int cnt =												\
+				m_cc_op[0x1b] +										\
+				m_cc_op[0x7a] +										\
+				m_cc_op[0xb3] +										\
+				m_cc_op[0x20] +										\
+				m_cc_ex[0x20];										\
+			while( DE > 0 && z80_ICount > cnt )						\
+			{														\
+				z80_ICount -= cnt;									\
+				m_r += 4;											\
+				DE--;												\
+			}														\
+		}															\
+		else														\
+		if( op3==0xc2 )												\
+		{															\
+			UINT8 ad1 = cpu_readop_arg(PCD+3);						\
+			UINT8 ad2 = cpu_readop_arg(PCD+4);						\
+			if( (ad1 + 256 * ad2) == (PCD - 1) )					\
+			{														\
+				int cnt =											\
+					m_cc_op[0x1b] +									\
+					m_cc_op[0x7a] +									\
+					m_cc_op[0xb3] +									\
+					m_cc_op[0xc2] +									\
+					m_cc_ex[0xc2];									\
+				while( DE > 0 && z80_ICount > cnt )					\
+				{													\
+					z80_ICount -= cnt;								\
+					m_r += 4;										\
+					DE--;											\
+				}													\
+			}														\
+		}															\
+	}																\
+}
+
+#define CHECK_HL_LOOP												\
+if( HL > 1 && PCD < 0xfffc ) {										\
+	UINT8 op1 = cpu_readop(PCD);									\
+	UINT8 op2 = cpu_readop(PCD+1);									\
+	if( (op1==0x7c && op2==0xb5) || (op1==0x7d && op2==0xb4) )		\
+	{																\
+		UINT8 op3 = cpu_readop(PCD+2);								\
+		UINT8 op4 = cpu_readop(PCD+3);								\
+		if( op3==0x20 && op4==0xfb )								\
+		{															\
+			int cnt =												\
+				m_cc_op[0x2b] +										\
+				m_cc_op[0x7c] +										\
+				m_cc_op[0xb5] +										\
+				m_cc_op[0x20] +										\
+				m_cc_ex[0x20];										\
+			while( HL > 0 && z80_ICount > cnt )						\
+			{														\
+				z80_ICount -= cnt;									\
+				m_r += 4;											\
+				HL--;												\
+			}														\
+		}															\
+		else														\
+		if( op3==0xc2 )												\
+		{															\
+			UINT8 ad1 = cpu_readop_arg(PCD+3);						\
+			UINT8 ad2 = cpu_readop_arg(PCD+4);						\
+			if( (ad1 + 256 * ad2) == (PCD - 1) )					\
+			{														\
+				int cnt =											\
+					m_cc_op[0x2b] +									\
+					m_cc_op[0x7c] +									\
+					m_cc_op[0xb5] +									\
+					m_cc_op[0xc2] +									\
+					m_cc_ex[0xc2];									\
+				while( HL > 0 && z80_ICount > cnt )					\
+				{													\
+					z80_ICount -= cnt;								\
+					m_r += 4;										\
+					HL--;											\
+				}													\
+			}														\
+		}															\
+	}																\
+}
+
+/**********************************************************
  * main opcodes
  **********************************************************/
 OP(op,00) {                                                                       } /* NOP              */
@@ -4467,7 +4612,7 @@ OP(op,07) { rlca();                                                             
 OP(op,08) { ex_af();                                                              } /* EX   AF,AF'      */
 OP(op,09) { add16(&m_hl, &m_bc);                                                    } /* ADD  HL,BC       */
 OP(op,0a) { A = rm(BC);  WZ=BC+1;                                                 } /* LD   A,(BC)      */
-OP(op,0b) { BC--;                                                                 } /* DEC  BC          */
+OP(op,0b) { BC--; CHECK_BC_LOOP;                                                    } /* DEC  BC          */
 OP(op,0c) { C = inc(C);                                                           } /* INC  C           */
 OP(op,0d) { C = dec(C);                                                           } /* DEC  C           */
 OP(op,0e) { C = arg();                                                            } /* LD   C,n         */
@@ -4485,7 +4630,7 @@ OP(op,17) { rla();                                                              
 OP(op,18) { jr();                                                                 } /* JR   o           */
 OP(op,19) { add16(&m_hl, &m_de);                                                    } /* ADD  HL,DE       */
 OP(op,1a) { A = rm(DE); WZ = DE + 1;                                              } /* LD   A,(DE)      */
-OP(op,1b) { DE--;                                                                 } /* DEC  DE          */
+OP(op,1b) { DE--; CHECK_DE_LOOP;                                                    } /* DEC  DE          */
 OP(op,1c) { E = inc(E);                                                           } /* INC  E           */
 OP(op,1d) { E = dec(E);                                                           } /* DEC  E           */
 OP(op,1e) { E = arg();                                                            } /* LD   E,n         */
@@ -4503,7 +4648,7 @@ OP(op,27) { daa();                                                              
 OP(op,28) { jr_cond(F & ZF, 0x28);                                                } /* JR   Z,o         */
 OP(op,29) { add16(&m_hl, &m_hl);                                                    } /* ADD  HL,HL       */
 OP(op,2a) { m_ea = arg16(); rm16(m_ea, &m_hl); WZ = m_ea+1;                        } /* LD   HL,(w)      */
-OP(op,2b) { HL--;                                                                 } /* DEC  HL          */
+OP(op,2b) { HL--; CHECK_HL_LOOP;                                                    } /* DEC  HL          */
 OP(op,2c) { L = inc(L);                                                           } /* INC  L           */
 OP(op,2d) { L = dec(L);                                                           } /* DEC  L           */
 OP(op,2e) { L = arg();                                                            } /* LD   L,n         */
