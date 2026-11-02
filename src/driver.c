@@ -3310,6 +3310,12 @@ DokiDoki Penguin Land *not confirmed
 	DRIVER( dotrikun )	/* cabinet test board */
 	DRIVER( dotriku2 )	/* cabinet test board */
 	DRIVER( dotriman )
+	DRIVER( snotec_conan )	/* VTech PreComputer Prestige / Bandai Super Note Club */
+	DRIVER( snotec_conan2 )
+	DRIVER( snotec_conan3 )
+	DRIVER( snotecu_conan )
+	DRIVER( snotecu_conan2 )
+	DRIVER( snotecu_conan3 )
 	DRIVER( spcpostn )	/* (c) 1986 Sega / Nasco" */
 	DRIVER( angelkds )	/* 833-6599 (c) 1988 Sega / Nasco? */
 	DRIVER( calorie )   /* (c) 1986 Sega */
