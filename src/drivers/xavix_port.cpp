@@ -243,7 +243,10 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
 }
 extern "C" unsigned char xavix_tv_read(unsigned a) {return opcode_read(a);}
 extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
-extern "C" void xavix_tv_input_sync() {stvpc_printer.reset();}
+extern "C" void xavix_tv_input_sync() {
+ stvpc_printer.reset();
+ stvpc_keyboard.sent_pads[0]=stvpc_keyboard.sent_pads[1]=0xff;
+}
 extern "C" void xavix_tv_vblank() {
  if(tv.super) {
   uint64_t keys=0;
@@ -256,6 +259,7 @@ extern "C" void xavix_tv_vblank() {
   if(arrows&4)keys|=uint64_t(1)<<14;
   if(arrows&8)keys|=uint64_t(1)<<15;
   stvpc_keyboard.poll(keys);
+  for(int i=0;i<2;i++)stvpc_keyboard.pads[i]=xavix_host_input(12+i)&0x1f;
   if((tv.m_ioevent_enable&4)&&!(tv.pio_dir[0]&0x80)&&stvpc_keyboard.start())xavix_host_timer(6,0.0001,0);
  }
  tv.mouse_keys();if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
