@@ -167,6 +167,18 @@ static READ_HANDLER( kb_r )
 		if (!(prestige_kb_matrix & (1 << line)))
 			data &= readinputport(offs * 8 + line);
 
+	/* The firmware's menu "select" is matrix KEY.6 bit 5 (glcolor "Button 2",
+	   KEYCODE_END). Let the space bar and Enter trigger it as well. */
+	if (offs == 0 && (readinputport(5) & 0x50) != 0x50)
+	{
+		/* Space / Enter act as the menu select key (KEY.6 bit 5). */
+		if (!(prestige_kb_matrix & 0x40))
+			data &= ~0x20;
+		/* ...and are not reported as their own keys, so they don't
+		   interfere with the selection. */
+		data |= 0x50;
+	}
+
 	return data;
 }
 
