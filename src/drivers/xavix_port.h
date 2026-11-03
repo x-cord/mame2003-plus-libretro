@@ -8,6 +8,7 @@ void xavix_tv_set_clock(double (*clock)(void));
 void xavix_tv_reset(int super, unsigned char *bios, unsigned char *cart);
 void xavix_tv_set_cart_eeprom(int enable);
 unsigned char *ekara_eeprom_data(void);
+unsigned char *xavix_save_eeprom_data(void);
 unsigned char *stvpc_eeprom_data(void);
 int stvpc_printer_height(void);
 int stvpc_printer_rows(void);
