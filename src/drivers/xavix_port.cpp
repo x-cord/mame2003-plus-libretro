@@ -9,8 +9,10 @@
 #include <cmath>
 #include <iterator>
 #include <type_traits>
+#include <stddef.h>
 #include "xavix_port.h"
 #include "../cpu/xavix_engine.inc"
+static bool xavix_polling_safe=false;
 using u8=uint8_t; using u16=uint16_t; using u32=uint32_t;
 using s8=int8_t; using s16=int16_t; using s32=int32_t;
 using offs_t=uint32_t; using pen_t=uint32_t;
@@ -71,7 +73,7 @@ struct Palette {
 #include "stvpc_keyboard.h"
 static StvpcKeyboard stvpc_keyboard;
 static StvpcPrinter stvpc_printer;
-static int xavix_output_field = 0;
+static int xavix_output_row_phase = 0;
 static struct CursorInput {
  bool keyboard=false, seen=false;
  int host[2]{};
@@ -79,6 +81,46 @@ static struct CursorInput {
 struct XavixTV {
  #include "xavix_members.inc"
  #include "xavix_decls.inc"
+ uint8_t *regular_coverage=nullptr;
+ const uint8_t *bitmap_coverage=nullptr;
+ void bitmap_row(bitmap_rgb32 &bitmap,const rectangle &clip,int y,int left,int right,int bpp,int z,int multiplier) {
+  auto pixels=&bitmap.pix(y);auto priorities=&m_zbuffer.pix(y);
+  const auto covered=bitmap_coverage?bitmap_coverage+y*512:nullptr;
+  const unsigned mask=(1u<<bpp)-1;
+  const int per_byte=8/bpp;
+  while(left<right) {
+   int count=std::min(per_byte,right-left);
+   unsigned packed=graphics_bits(count*bpp,m_extra!=nullptr);
+   for(int i=0;i<count;i++,left++) {
+    unsigned pen=packed&mask;packed>>=bpp;
+    if((m_bmp_palram_sh[pen]&31)>=24)continue;
+    int x=left*multiplier;
+    const int end=std::min(x+multiplier-1,clip.max_x);
+    for(int pixel=std::max(x,clip.min_x);pixel<=end;pixel++) {
+     if(z>priorities[pixel]||(z==priorities[pixel]&&(!covered||!covered[pixel]))) {
+      pixels[pixel]=palette.colors[256+pen];priorities[pixel]=z;
+     }
+    }
+   }
+  }
+ }
+ uint8_t graphics_bits(int count,bool sx) {
+  unsigned value=0,shift=0;
+  while(count>0) {
+   if(!m_tmp_databit) {
+    int address=m_tmp_dataaddress;
+    if(sx) {
+     if(address&0x2000000){address&=0x1ffffff;address^=0x600000;}
+     m_bit=((address&0x1000000)&&m_extra)?m_extra[address&0x7fffff]:read_full_data_sp_bypass(address);
+    } else m_bit=m_disable_memory_bypass?opcode_read(address):read_full_data_sp_bypass(address);
+   }
+   int take=std::min(count,8-m_tmp_databit);
+   value|=((m_bit>>m_tmp_databit)&((1u<<take)-1))<<shift;
+   m_tmp_databit+=take;count-=take;shift+=take;
+   if(m_tmp_databit==8){m_tmp_databit=0;m_tmp_dataaddress++;}
+  }
+  return value;
+ }
  uint8_t read_full_data_sp_bypass(uint32_t a) {
   if((a&0x800000)||(a&0x8000))return ext_read(a&0x7fffff);
   a&=0x7fff;
@@ -88,7 +130,7 @@ struct XavixTV {
   return 0;
  }
  uint8_t txarray_r(uint16_t a) {
-  if(a<0x400) {uint8_t v=a;return ((a&0x200)?((~v>>4)&15):(v>>4))|((a&0x100)?(~v<<4):(v<<4));}
+  if(a<0x400) {uint8_t v=a;return ((a&0x200)?((~v>>4)&15):(v>>4))|((a&0x100)?(uint8_t(~v)<<4):(v<<4));}
   return m_txarray[(a-0x400)/0x400];
  }
  bool mouse_position(int &x,int &y) {
@@ -169,6 +211,7 @@ static XavixTV tv;
 
 static uint8_t low_read(uint16_t a) {
  if(a<0x4000)return tv.ram[a];
+ xavix_polling_safe=false;
  #include "xavix_read.inc"
  if(a==0x7b00||a==0x7b01)return tv.super?0:255;
  if(a==0x7b10||a==0x7b11)return tv.super?tv.mouse_read(a&1):255;
@@ -182,8 +225,10 @@ static uint8_t low_read(uint16_t a) {
  return tv.ram[a&0x7fff];
 }
 static void low_write(uint16_t a,uint8_t d) {
+ xavix_polling_safe=false;
  if(a==0xfe){cpu.bank=d;return;}
  if(a==0xff){cpu.databank=d;return;}
+ if(a<0x4000){tv.ram[a]=d;return;}
  if(tv.super && (a==0x7b10||a==0x7b11)){tv.mouse_clear(a&1);return;}
  if(a>=0x75f0 && a<=0x75ff)xavix_host_audio_sync();
  #include "xavix_write.inc"
@@ -211,6 +256,7 @@ static uint8_t ext_read(uint32_t a) {
  return tv.bios[(a-0x600000)&0xfffff];
 }
 static void ext_write(uint32_t a,uint8_t d) {
+ xavix_polling_safe=false;
  a&=0x7fffff;
  if(tv.super && a>=0x600000&&a<=0x67ffff)tv.bitmap_buffer[a-0x600000]=d;
 }
@@ -282,22 +328,47 @@ extern "C" void xavix_tv_timer(int id) {
 }
 static bitmap_rgb32 framebuffer;
 extern "C" void xavix_tv_render(unsigned int *pixels,int first,int last) {
- xavix_output_field=0;
+ xavix_output_row_phase=0;
  framebuffer.data=pixels;
  tv.screen_update(tv.screen,framebuffer,rectangle(0,tv.super?511:255,first,last));
 }
 extern "C" void xavix_tv_render_progressive(unsigned int *pixels,int first,int last) {
- static bitmap_rgb32 field;
- const int top=first/2,bottom=last/2;
+ static bitmap_rgb32 field,regular;
+ static uint16_t depth[512*256];
+ static uint8_t coverage[512*256];
+ // Super XaviX produces a complete frame at 60 Hz. Render each sprite once
+ // from its current graphics address and attributes for both row phases.
+ const int first_row=first/2,last_row=last/2;
+ rectangle clip;
+ int saved_address=0,saved_bit=0,saved_cache=0;
  for(int parity=0;parity<2;parity++) {
-  xavix_output_field=parity;
-  tv.screen_update(tv.screen,field,rectangle(0,511,top,bottom));
+  const int top=first/2+((first&1)>parity),bottom=last/2-((last&1)<parity);
+  if(!parity) {
+   clip=tv.do_arena(tv.screen,regular,rectangle(0,511,first_row,last_row));
+   memset(coverage+first_row*512,0,(last_row-first_row+1)*512);
+   tv.regular_coverage=coverage;
+   tv.draw_regular_layers(tv.screen,regular,clip);
+   tv.regular_coverage=nullptr;
+   for(int y=first_row;y<=last_row;y++)memcpy(depth+y*512,&tv.m_zbuffer.pix(y),512*sizeof(*depth));
+  }
+  if(!parity){saved_address=tv.m_tmp_dataaddress;saved_bit=tv.m_tmp_databit;saved_cache=tv.m_bit;}
+  if(top>bottom)continue;
+  xavix_output_row_phase=parity;
+  for(int y=top;y<=bottom;y++) {
+   memcpy(&field.pix(y),&regular.pix(y),512*sizeof(*pixels));
+   memcpy(&tv.m_zbuffer.pix(y),depth+y*512,512*sizeof(*depth));
+  }
+  tv.bitmap_coverage=coverage;
+  rectangle bitmap_clip=clip;bitmap_clip.min_y=top;bitmap_clip.max_y=bottom;
+  tv.draw_bitmap_layer(tv.screen,field,bitmap_clip);
   for(int y=top;y<=bottom;y++) {
    int out=y*2+parity;
-   if(out>=first&&out<=last)memcpy(pixels+out*512,&field.pix(y),512*sizeof(*pixels));
+   memcpy(pixels+out*512,&field.pix(y),512*sizeof(*pixels));
   }
  }
- xavix_output_field=0;
+ tv.bitmap_coverage=nullptr;
+ tv.m_tmp_dataaddress=saved_address;tv.m_tmp_databit=saved_bit;tv.m_bit=saved_cache;
+ xavix_output_row_phase=0;
 }
 extern "C" void xavix_tv_audio(short **outputs,int samples) {sound_stream stream{samples,outputs};sound.sound_stream_update(stream);}
 extern "C" void xavix_init(void) {xavix_host_save("cpu",&cpu,sizeof(cpu));}
@@ -307,11 +378,32 @@ extern "C" void xavix_reset(void *) {
 }
 extern "C" void xavix_exit(void) {}
 extern "C" int xavix_execute(int cycles) {
+ struct {
+  bool valid=false;uint16_t branch=0,target=0;uint8_t bank=0;
+  int remaining=0;
+  uint8_t registers[offsetof(XavixCPU,special)]{};
+ } polling;
+ xavix_polling_safe=false;
  xavix_ICount=cycles;
  while(xavix_ICount>0) {
   if(cpu.stopped){xavix_ICount=0;break;}
-  if(cpu.m_nmi_pending||cpu.pending_irq){cpu.pending_irq=false;cpu.m_irq_taken=true;cpu.brk_xav_imp();}
-  else {cpu.m_PPC=cpu.m_PC;cpu.prevbank=cpu.bank;uint8_t op=opcode_read((cpu.bank<<16)|cpu.m_PC);cpu.m_PC++;cpu.dispatch(op);}
+  if(cpu.m_nmi_pending||cpu.pending_irq){polling.valid=false;cpu.pending_irq=false;cpu.m_irq_taken=true;cpu.brk_xav_imp();}
+  else {
+   cpu.m_PPC=cpu.m_PC;cpu.prevbank=cpu.bank;
+   uint8_t op=opcode_read((cpu.bank<<16)|cpu.m_PC);cpu.m_PC++;cpu.dispatch(op);
+   if(cpu.super&&cpu.bank==cpu.prevbank&&cpu.m_PC<=cpu.m_PPC&&!cpu.pending_irq&&!cpu.m_nmi_pending) {
+    // Read-only polling may skip whole iterations with identical CPU state.
+    // The host's execution budget still bounds the next interrupt or timer.
+    if(polling.valid&&xavix_polling_safe&&polling.branch==cpu.m_PPC&&polling.target==cpu.m_PC&&polling.bank==cpu.bank&&
+       !memcmp(polling.registers,&cpu,sizeof(polling.registers))) {
+     int period=polling.remaining-xavix_ICount;
+     if(period>0&&xavix_ICount>0)xavix_ICount%=period;
+    }
+    polling.valid=true;polling.branch=cpu.m_PPC;polling.target=cpu.m_PC;polling.bank=cpu.bank;
+    polling.remaining=xavix_ICount;memcpy(polling.registers,&cpu,sizeof(polling.registers));
+    xavix_polling_safe=true;
+   }
+  }
  }
  return cycles-xavix_ICount;
 }

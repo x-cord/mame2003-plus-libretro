@@ -1166,10 +1166,7 @@ void XavixTV::draw_sprites_line(screen_device &screen, bitmap_rgb32 &bitmap, con
 }
 void XavixTV::get_tile_pixel_dat(uint8_t &dat, int bpp)
 {
-	for (int i = 0; i < bpp; i++)
-	{
-		dat |= ((super ? get_next_bit_sx() : get_next_bit()) << i);
-	}
+	dat |= graphics_bits(bpp,super);
 }
 void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect, int tile, int bpp, int xpos, int ypos, int drawheight, int drawwidth, int flipx, int flipy, int pal, int zval, int line)
 {
@@ -1226,6 +1223,7 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 			{
 				bitmap.pix(ypos, pixel) = paldata[pen];
 				zyposptr[pixel] = zval;
+				if (regular_coverage) regular_coverage[ypos*512+pixel] = 1;
 			}
 		}
 	}
@@ -1345,14 +1343,14 @@ void XavixTV::draw_bitmap_layer(screen_device &screen, bitmap_rgb32 &bitmap, con
 
 			int bpp = ((mode & 0x0e) >> 1) + 1;
 
-			// Both stored fields are woven into each progressive output frame.
+			// Select adjacent source rows for the two output row phases.
 			int rowbytes = ((rgt - lft) * bpp + 7) / 8;
 			if (super && rowbytes > 0 && step * 8 == rowbytes * 2)
 			{
 				if (base2 % (rowbytes * 2) == rowbytes) base2 -= rowbytes;
 				// The bitmap origin falls between fields: output row zero starts
 				// at stored row one, then continues into the next row pair.
-				base2 += (xavix_output_field + 1) * rowbytes;
+				base2 += (xavix_output_row_phase + 1) * rowbytes;
 			}
 			int zval = ((mode & 0xf0) >> 4);
 
@@ -1380,69 +1378,13 @@ void XavixTV::draw_bitmap_layer(screen_device &screen, bitmap_rgb32 &bitmap, con
 			{
 				int line = y - top;
 
-				if ((line > 0) && (y < bot)) // should also clip if out of range for botadr
+				if ((line > 0) && (y < bot - 1)) // top and bottom edges are outside the active bitmap
 				{
 					set_data_address(base + base2 + ((line * (step * 64)) / 8), 0);
 
 					// also needs to take into account 'lftadr' address from the line base
 					// and clip against 'rgtadr' address if reads go beyond linebase + that for the line
-					for (int x = lft - hposadjust; x < rgt - hposadjust; x++)
-					{
-						uint32_t* const yposptr = &bitmap.pix(y);
-						uint16_t* const zyposptr = &m_zbuffer.pix(y);
-
-						uint8_t dat = 0;
-
-						if (m_extra)
-						{
-							for (int i = 0; i < bpp; i++)
-							{
-								dat |= (get_next_bit_sx() << i);
-							}
-						}
-						else
-						{
-							for (int i = 0; i < bpp; i++)
-							{
-								dat |= (get_next_bit() << i);
-							}
-						}
-
-						int realx;
-						realx = x;
-
-						if (!is_highres)
-							realx *= 2;
-
-						if (cliprect.contains(realx, y))
-						{
-							if ((m_bmp_palram_sh[dat] & 0x1f) < 24) // same transparency logic as everything else? (baseball title)
-							{
-								if (zval >= zyposptr[realx])
-								{
-									yposptr[realx] = paldata[dat + 0x100];
-									zyposptr[realx] = zval;
-								}
-							}
-						}
-
-						// draw doubled pixel for low-res bitmap
-						if (!is_highres)
-							realx += 1;
-
-						if (cliprect.contains(realx, y))
-						{
-							if ((m_bmp_palram_sh[dat] & 0x1f) < 24) // same transparency logic as everything else? (baseball title)
-							{
-								if (zval >= zyposptr[realx])
-								{
-									yposptr[realx] = paldata[dat + 0x100];
-									zyposptr[realx] = zval;
-								}
-							}
-						}
-
-					}
+					bitmap_row(bitmap, cliprect, y, lft-hposadjust, rgt-hposadjust, bpp, zval, is_highres?1:2);
 				}
 			}
 

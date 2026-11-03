@@ -85,12 +85,16 @@ static VIDEO_UPDATE(xavixtv) {
  int y,x;
  if(xavix_super)xavix_tv_render_progressive(xavix_pixels,cliprect->min_y,cliprect->max_y);
  else xavix_tv_render(xavix_pixels,cliprect->min_y,cliprect->max_y);
- for(y=cliprect->min_y;y<=cliprect->max_y;y++)
-  for(x=cliprect->min_x;x<=cliprect->max_x;x++) {
-   UINT32 c=xavix_pixels[y*512+x];
-   if(bitmap->depth==32)((UINT32*)bitmap->line[y])[x]=c;
-   else ((UINT16*)bitmap->line[y])[x]=((c>>9)&0x7c00)|((c>>6)&0x03e0)|((c>>3)&0x001f);
-  }
+ if(bitmap->depth==32) {
+  for(y=cliprect->min_y;y<=cliprect->max_y;y++)
+   memcpy((UINT32*)bitmap->line[y]+cliprect->min_x,xavix_pixels+y*512+cliprect->min_x,(cliprect->max_x-cliprect->min_x+1)*sizeof(UINT32));
+ } else {
+  for(y=cliprect->min_y;y<=cliprect->max_y;y++)
+   for(x=cliprect->min_x;x<=cliprect->max_x;x++) {
+    UINT32 c=xavix_pixels[y*512+x];
+    ((UINT16*)bitmap->line[y])[x]=((c>>9)&0x7c00)|((c>>6)&0x03e0)|((c>>3)&0x001f);
+   }
+ }
 }
 static DRIVER_INIT(ekara) {xavix_super=0;}
 static DRIVER_INIT(stvpc) {
