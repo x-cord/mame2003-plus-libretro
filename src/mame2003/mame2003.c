@@ -12,6 +12,9 @@
 #include <file/file_path.h>
 #include <streams/file_stream.h>
 #include <math.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 #if (HAS_DRZ80 || HAS_CYCLONE)
 #include "frontend_list.h"
@@ -724,6 +727,12 @@ size_t retro_get_memory_size(unsigned type)
 {
   return retro_get_memory_data(type) ? 1024 : 0;
 }
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE size_t ejs_save_memory_size(void)
+{
+  return retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+}
+#endif
 bool retro_load_game_special(unsigned game_type, const struct retro_game_info *info, size_t num_info){return false;}
 void retro_cheat_reset(void){}
 void retro_cheat_set(unsigned unused, bool unused1, const char* unused2){}

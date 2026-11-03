@@ -115,6 +115,10 @@
 #include "driver.h"
 #include "mame.h"
 #include "bootstrap.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include "machine/brew_nvram.h"
+#endif
 
 
 /***************************************************************************
@@ -501,6 +505,9 @@ void pause_action_start_emulator(void)
   cpu_run();
 }
 
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
 void mame_save_nvram(void)
 {
     /* save the NVRAM */
@@ -514,6 +521,48 @@ void mame_save_nvram(void)
         }
     }
 }
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE const char *ejs_native_save_path(void)
+{
+    static char path[4096];
+    char directory[4096];
+    if (!Machine || !Machine->drv || !Machine->gamedrv || !Machine->drv->nvram_handler)
+        return NULL;
+    osd_get_path(FILETYPE_NVRAM, directory);
+    snprintf(path, sizeof(path), "%s/%s.nv", directory, Machine->gamedrv->name);
+    return path;
+}
+
+EMSCRIPTEN_KEEPALIVE int ejs_validate_native_save(const unsigned char *data, unsigned size)
+{
+    if (!ejs_native_save_path())
+        return 0;
+    if (!strncmp(Machine->gamedrv->name, "brew_", 5))
+        return brew_native_save_valid(data, size);
+    return data != NULL && size > 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int ejs_flush_native_save(void)
+{
+    if (Machine && Machine->drv && Machine->gamedrv && Machine->drv->nvram_handler)
+        mame_save_nvram();
+    return 1;
+}
+
+EMSCRIPTEN_KEEPALIVE int ejs_load_native_save(void)
+{
+    mame_file *file;
+    if (!ejs_native_save_path())
+        return 0;
+    file = mame_fopen(Machine->gamedrv->name, 0, FILETYPE_NVRAM, 0);
+    if (!file)
+        return 0;
+    (*Machine->drv->nvram_handler)(file, 0);
+    mame_fclose(file);
+    return 1;
+}
+#endif
 
 void run_machine_core_done(void)
 {
