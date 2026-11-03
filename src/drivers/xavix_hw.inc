@@ -1283,6 +1283,8 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	if (x_end < cliprect.min_x || x_start > cliprect.max_x)
 		return;
 
+	const bool full_x = x_start >= cliprect.min_x && x_end <= cliprect.max_x;
+
 	const bool effect_icon = ekara_effect_icon(tile, bpp, pal);
 	const pen_t *paldata = effect_icon ? ekara_effect_palette.pens() : m_palette->pens();
 	const uint8_t *palram_sh = effect_icon ? bios + 0x8e20 : m_palram_sh;
@@ -1308,15 +1310,17 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	pen_t *const bitmap_row = &bitmap.pix(ypos);
 	uint8_t *const reg_cov = regular_coverage ? regular_coverage + ypos * 512 : nullptr;
 
+	uint8_t tile_pixels[16];
+	read_tile_pixels(tile_pixels, drawwidth, bpp, super);
+
 	if (hres == 1)
 	{
 		for (int x = 0; x < drawwidth; x++)
 		{
 			int col = flipx ? (xpos + (drawwidth - 1) - x) : (xpos + x);
-			uint8_t dat = 0;
-			get_tile_pixel_dat(dat, bpp);
+			uint8_t dat = tile_pixels[x];
 
-			if (col < cliprect.min_x || col > cliprect.max_x) continue;
+			if (!full_x && (col < cliprect.min_x || col > cliprect.max_x)) continue;
 			if (zval < zyposptr[col]) continue;
 			int pen = (dat + pal_base) & 0xff;
 			if ((palram_sh[pen] & 0x1f) < 24)
@@ -1332,20 +1336,24 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 		for (int x = 0; x < drawwidth; x++)
 		{
 			int col = (flipx ? (xpos + (drawwidth - 1) - x) : (xpos + x)) * hres;
-			uint8_t dat = 0;
-			get_tile_pixel_dat(dat, bpp);
+			uint8_t dat = tile_pixels[x];
 
-			for (int pixel = col; pixel < col + hres; pixel++)
+			const int pen = (dat + pal_base) & 0xff;
+			if ((palram_sh[pen] & 0x1f) >= 24) continue;
+			const pen_t color = paldata[pen];
+			int first = col;
+			int last = col + hres - 1;
+			if (!full_x)
 			{
-				if (!cliprect.containsx(pixel)) continue;
+				if (first < cliprect.min_x) first = cliprect.min_x;
+				if (last > cliprect.max_x) last = cliprect.max_x;
+			}
+			for (int pixel = first; pixel <= last; pixel++)
+			{
 				if (zval < zyposptr[pixel]) continue;
-				int pen = (dat + pal_base) & 0xff;
-				if ((palram_sh[pen] & 0x1f) < 24)
-				{
-					bitmap_row[pixel] = paldata[pen];
-					zyposptr[pixel] = zval;
-					if (reg_cov) reg_cov[pixel] = 1;
-				}
+				bitmap_row[pixel] = color;
+				zyposptr[pixel] = zval;
+				if (reg_cov) reg_cov[pixel] = 1;
 			}
 		}
 	}
