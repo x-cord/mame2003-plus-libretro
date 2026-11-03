@@ -36,6 +36,7 @@ int            retro_running = 0;
 static int     frame_run_since_load = 0;
 int            gotFrame;
 static float   delta_samples;
+static bool    audio_latency_pending;
 int            samples_per_frame = 0;
 int            orig_samples_per_frame = 0;
 short*         samples_buffer;
@@ -288,6 +289,7 @@ bool retro_load_game(const struct retro_game_info *game)
     return false;
 
   set_content_flags();
+  audio_latency_pending = true;
 
   options.libretro_content_path = strdup(game->path);
   path_basedir(options.libretro_content_path);
@@ -393,6 +395,19 @@ void retro_run (void)
 {
   bool updated = false;
   int cpunum;
+  if (audio_latency_pending)
+  {
+    /* Give Beena's speech playback enough queued audio to survive short
+     * browser scheduling stalls; 64 ms left only about 20 ms queued in
+     * the OpenAL frontend.
+     * Libretro requires this request inside retro_run(), once per load.
+     * Clear our override when another machine is loaded. */
+    unsigned latency = (!strcmp(game_driver->name, "beena") ||
+        !strncmp(game_driver->name, "beena_", 6))
+        ? 256 : 0;
+    audio_latency_pending = false;
+    environ_cb(RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY, &latency);
+  }
   poll_cb(); /* execute input callback */
 
   if (retro_running == 0) /* first time through the loop */

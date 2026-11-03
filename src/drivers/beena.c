@@ -13,6 +13,7 @@
 
 #include "driver.h"
 #include "state.h"
+#include "sound/ap2010midi.h"
 #include "cpu/arm7be/arm7be.h"
 
 #include <time.h>
@@ -43,7 +44,30 @@ static UINT32 *beena_aux_regs;
 static UINT32 beena_video_regs[0x100/4];
 static UINT16 beena_rtc[0x100/2];
 static UINT32 beena_midi_regs[0x20/4];
+/* Retained in the state signature for compatibility with existing Beena saves. */
 static UINT32 beena_midi_busy;
+static ap2010_midi_state beena_midi;
+static UINT8 beena_midi_rom[0x8000];
+static int beena_midi_stream = -1;
+
+static void beena_midi_callback(int param, INT16 **buffers, int frames)
+{
+    (void)param;
+    ap2010_midi_render(&beena_midi, beena_midi_rom, buffers[0], buffers[1], frames);
+}
+
+static void beena_midi_init_stream(void)
+{
+    static const char *names[] = { "AP2010 MIDI L", "AP2010 MIDI R" };
+    static int levels[] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
+    if (beena_midi_stream < 0)
+        beena_midi_stream = stream_init_multi(2, names, levels, AP2010_MIDI_RATE, 0, beena_midi_callback);
+}
+
+static READ32_HANDLER( beena_midi_rom_r )
+{
+    return ((UINT32 *)memory_region(REGION_SOUND1))[offset];
+}
 
 /* Palette: source is BGR555; render output is RGB555 (0RGB1555). */
 static UINT16 beena_pal_base[0x100];
@@ -743,13 +767,36 @@ static void beena_update_rtc(void)
 
 static READ32_HANDLER( beena_midi_reg_r )
 {
-	if (offset == 0 && beena_midi_busy > 0) { beena_midi_busy--; return 0x2; }
-	return beena_midi_regs[offset];
+    if (beena_midi_stream >= 0) stream_update(beena_midi_stream, 0);
+    /* The BIOS retries a busy write on its next IRQ. A synthetic one-read
+       busy pulse limits it to four MIDI bytes per video frame and starves
+       dense music. Report actual queue capacity instead. */
+    if (offset == 0 && !ap2010_midi_can_accept_word(&beena_midi)) return 0x2;
+    return beena_midi_regs[offset];
 }
 static WRITE32_HANDLER( beena_midi_reg_w )
 {
-	if (offset == 0x8/4) beena_midi_busy = 1;
-	COMBINE_DATA(&beena_midi_regs[offset]);
+    int shift;
+    beena_midi_init_stream();
+    if (beena_midi_stream >= 0) stream_update(beena_midi_stream, 0);
+    COMBINE_DATA(&beena_midi_regs[offset]);
+    data = beena_midi_regs[offset];
+    switch (offset) {
+    case 0x4/4:
+        if ((data & 5) == 5) ap2010_midi_stop(&beena_midi);
+        break;
+    case 0x8/4:
+        for (shift = 24; shift >= 0; shift -= 8)
+            if ((mem_mask & (0xffU << shift)) != (0xffU << shift))
+                ap2010_midi_push(&beena_midi, data >> shift);
+        break;
+    case 0xc/4:
+        ap2010_midi_message(&beena_midi, beena_midi_rom, data >> 24, data >> 16, data >> 8);
+        break;
+    case 0x18/4:
+        ap2010_midi_start(&beena_midi, data & 0xffff);
+        break;
+    }
 }
 
 static void beena_memcache_advance(UINT32 *status)
@@ -951,10 +998,12 @@ static void beena_scanline_callback(int param)
 /* pair of FIFOs (normal + "fast") of signed 16-bit big-endian PCM fed by   */
 /* the BIOS (decoded .ogg/.speex output), played at 8 kHz or 16 kHz with a  */
 /* software volume. The 0.78 streams API is used in place of MAME's sound   */
-/* streams; the sample rate can be changed at runtime (stream_set_sample_rate). */
+/* streams. Keep its host rate fixed: changing a 0.78 stream's rate partway */
+/* through a frame reinterprets samples already generated at the old rate. */
 /* ----------------------------------------------------------------------- */
 
 #define PCM_FIFO_MAX 0x800
+#define PCM_STREAM_RATE 16000
 
 static UINT32 beena_pcm_regs[0x40 / 4];
 static float  beena_pcm_volume;
@@ -964,6 +1013,8 @@ static UINT16 beena_pcm_fifo_size, beena_pcm_fifo_head, beena_pcm_fifo_tail;
 static UINT16 beena_pcm_fifo_fast_data[PCM_FIFO_MAX];
 static UINT16 beena_pcm_fifo_fast_size, beena_pcm_fifo_fast_head, beena_pcm_fifo_fast_tail;
 static int    beena_pcm_stream = -1;
+static UINT16 beena_pcm_phase;
+static INT16  beena_pcm_sample;
 
 static UINT16 beena_pcm_fifo_pop(void)
 {
@@ -981,7 +1032,6 @@ static UINT16 beena_pcm_fifo_fast_pop(void)
 }
 static void beena_pcm_fifo_push(UINT16 sample)
 {
-	if (sample == 0) return;
 	if (beena_pcm_fifo_size > PCM_FIFO_MAX - 1) beena_pcm_fifo_pop();
 	beena_pcm_fifo_data[beena_pcm_fifo_tail] = sample;
 	beena_pcm_fifo_tail = (beena_pcm_fifo_tail + 1) & (PCM_FIFO_MAX - 1);
@@ -989,7 +1039,6 @@ static void beena_pcm_fifo_push(UINT16 sample)
 }
 static void beena_pcm_fifo_fast_push(UINT16 sample)
 {
-	if (sample == 0) return;
 	if (beena_pcm_fifo_fast_size > PCM_FIFO_MAX - 1) beena_pcm_fifo_fast_pop();
 	beena_pcm_fifo_fast_data[beena_pcm_fifo_fast_tail] = sample;
 	beena_pcm_fifo_fast_tail = (beena_pcm_fifo_fast_tail + 1) & (PCM_FIFO_MAX - 1);
@@ -1001,14 +1050,22 @@ static void beena_pcm_stream_callback(int param, INT16 *buffer, int length)
 	int i;
 	(void)param;
 	for (i = 0; i < length; i++) {
-		INT16 sample;
-		if (beena_pcm_fifo_fast_size)
-			sample = (INT16)beena_pcm_fifo_fast_pop();
-		else if (beena_pcm_fifo_size)
-			sample = (INT16)beena_pcm_fifo_pop();
-		else
-			sample = 0;
+		INT16 sample = beena_pcm_sample;
+		if (beena_pcm_phase == 0) {
+			INT16 previous = sample;
+			if (beena_pcm_fifo_fast_size)
+				sample = (INT16)beena_pcm_fifo_fast_pop();
+			else if (beena_pcm_fifo_size)
+				sample = (INT16)beena_pcm_fifo_pop();
+			else
+				sample = 0;
+			beena_pcm_sample = sample;
+			/* At 8 kHz interpolate the intervening 16 kHz output sample. */
+			if (beena_pcm_sample_rate == 8000)
+				sample = ((INT32)previous + sample) / 2;
+		}
 		buffer[i] = (INT16)(sample * beena_pcm_volume);
+		beena_pcm_phase = (beena_pcm_phase + beena_pcm_sample_rate) % PCM_STREAM_RATE;
 	}
 }
 
@@ -1017,17 +1074,26 @@ static void beena_pcm_stream_callback(int param, INT16 *buffer, int length)
 static void beena_pcm_init_stream(void)
 {
 	if (beena_pcm_stream >= 0) return;
-	beena_pcm_stream = stream_init("AP2010PCM", 100, beena_pcm_sample_rate, 0,
+	beena_pcm_stream = stream_init("AP2010PCM", 100, PCM_STREAM_RATE, 0,
 			beena_pcm_stream_callback);
 }
 
 static READ32_HANDLER( beena_pcm_r )
 {
 	UINT32 o = offset & 0x3f;
+	/* Readiness and fill level must include samples played since the last
+	   access, including a producer waiting without writing more data. */
+	if (beena_pcm_stream >= 0) stream_update(beena_pcm_stream, 0);
 	if (o == 0) {
 		/* PCM data (0x5001000c) only received when 0x50010000 & 1 != 0;
 		   PCM parameters (0x50010010/18) only when 0x50010000 & 4 != 0; */
-		return (beena_pcm_regs[0x4/4] != 0) ? 0x0f : 0;
+		UINT32 ready = (beena_pcm_regs[0x4/4] != 0) ? 0x0f : 0;
+		/* Conan checks this bit once before submitting a decoded block.
+		   Always returning ready overwrites queued speech (160 samples
+		   per video frame versus 8000 samples/s consumed). */
+		if (beena_pcm_fifo_size > 0x1ff) ready &= ~1U;
+		if (beena_pcm_fifo_fast_size > PCM_FIFO_MAX - 2) ready &= ~4U;
+		return ready;
 	} else if (o == 0x4/4 && beena_pcm_fifo_size > 0x1ff) {
 		return beena_pcm_regs[o] & 0xfffffffe;
 	} else if (o == 0x1c/4) {
@@ -1042,14 +1108,14 @@ static WRITE32_HANDLER( beena_pcm_w )
 {
 	UINT32 o = offset & 0x3f;
 	beena_pcm_init_stream();
-	COMBINE_DATA(&beena_pcm_regs[o]);
 	if (beena_pcm_stream >= 0) stream_update(beena_pcm_stream, 0);
+	COMBINE_DATA(&beena_pcm_regs[o]);
 	switch (o) {
 		case 0x4/4:
 			if ((data & 0x78) == 0x78) {
 				beena_pcm_sample_rate = 8000 * (1 + ((data >> 1) & 1));
-				if (beena_pcm_stream >= 0)
-					stream_set_sample_rate(beena_pcm_stream, beena_pcm_sample_rate);
+				beena_pcm_phase = 0;
+				beena_pcm_sample = 0;
 				/* When a new stream starts, stop playback of the previous one. */
 				beena_pcm_fifo_size = 0; beena_pcm_fifo_head = 0; beena_pcm_fifo_tail = 0;
 			}
@@ -1061,9 +1127,13 @@ static WRITE32_HANDLER( beena_pcm_w )
 		case 0x10/4:
 			/* Fast samples are always played first; also serve an FIQ so
 			   .au data processing does not hang. */
-			if (data != 0) beena_requested_fiq = 1;
-			if (ACCESSING_MSW32) beena_pcm_fifo_fast_push((data & 0xffff0000U) >> 16);
-			if (ACCESSING_LSW32)  beena_pcm_fifo_fast_push(data & 0x0000ffffU);
+			/* The BIOS also writes a zero word here every video IRQ as an
+			   idle command. Zero samples within a real word remain PCM. */
+			if (data != 0) {
+				beena_requested_fiq = 1;
+				if (ACCESSING_MSW32) beena_pcm_fifo_fast_push((data & 0xffff0000U) >> 16);
+				if (ACCESSING_LSW32) beena_pcm_fifo_fast_push(data & 0x0000ffffU);
+			}
 			break;
 		case 0x14/4:
 			/* Panning (bits not identified). */
@@ -1079,6 +1149,7 @@ static WRITE32_HANDLER( beena_pcm_w )
 
 static void beena_presave(void)
 {
+    if (beena_midi_stream >= 0) stream_update(beena_midi_stream, 0);
 	if (beena_pcm_stream >= 0) stream_update(beena_pcm_stream, 0);
 	beena_scanline_timeleft = timer_timeleft(beena_scanline_timer);
 }
@@ -1087,12 +1158,12 @@ static void beena_postload(void)
 {
 	UINT32 i;
 	beena_restore_book_pen();
-	arm7_clear_hotspots();
+	arm7be_clear_hotspots();
 	if (!(readinputport(9) & 0x10) && beena_irq_wait_start_addr != 0xffffffff)
-		for (i = 0; i < 5; i++) arm7_add_hotspot(beena_irq_wait_start_addr + i * 4);
+		for (i = 0; i < 5; i++) arm7be_add_hotspot(beena_irq_wait_start_addr + i * 4);
 	timer_adjust(beena_scanline_timer, beena_scanline_timeleft, beena_next_scanline, 0);
+    beena_midi_init_stream();
 	beena_pcm_init_stream();
-	if (beena_pcm_stream >= 0) stream_set_sample_rate(beena_pcm_stream, beena_pcm_sample_rate);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1115,7 +1186,9 @@ static MEMORY_READ32_START( beena_readmem )
 	{ 0x60000000, 0x600000ff, beena_rtc_r },
 	{ 0x60010000, 0x6003ffff, MRA32_RAM },
 	{ 0x70000000, 0x7000001f, beena_midi_reg_r },
-	{ 0x70010000, 0x7003ffff, MRA32_RAM },
+	{ 0x70010000, 0x7001ffff, MRA32_RAM },
+    { 0x70020000, 0x70027fff, beena_midi_rom_r },
+    { 0x70028000, 0x7003ffff, MRA32_RAM },
 	{ 0x80000000, 0x807fffff, beena_cart_r },
 	{ 0xa0000000, 0xa07fffff, beena_cart_flash_r },
 	{ 0xc0000000, 0xc00c5fff, MRA32_RAM },
@@ -1144,7 +1217,9 @@ static MEMORY_WRITE32_START( beena_writemem )
 	{ 0x60000000, 0x600000ff, beena_rtc_w },
 	{ 0x60010000, 0x6003ffff, MWA32_RAM },
 	{ 0x70000000, 0x7000001f, beena_midi_reg_w },
-	{ 0x70010000, 0x7003ffff, MWA32_RAM },
+	{ 0x70010000, 0x7001ffff, MWA32_RAM },
+    { 0x70020000, 0x70027fff, MWA32_NOP },
+    { 0x70028000, 0x7003ffff, MWA32_RAM },
 	{ 0x80000000, 0x807fffff, MWA32_NOP },
 	{ 0xa0000000, 0xa07fffff, MWA32_RAM },
 	{ 0xc0000000, 0xc00c5fff, MWA32_RAM, &beena_bitmap },
@@ -1288,6 +1363,10 @@ static void beena_init(void)
 	memset(beena_paletteram, 0, 0x200*4);
 
 	beena_scale = 1;
+    beena_midi_stream = -1;
+    for (i = 0; i < 0x8000; i++) {
+        beena_midi_rom[i] = memory_region(REGION_SOUND1)[BYTE4_XOR_BE(i)];
+    }
 	beena_pcm_stream = -1;
 	beena_irq_wait_start_addr = 0xffffffff;
 	for (i = 0; i < 0x100/2; i++)
@@ -1304,6 +1383,7 @@ static MACHINE_INIT( beena )
 	beena_scanline = 0;
 	memset(beena_midi_regs, 0, sizeof(beena_midi_regs));
 	beena_midi_busy = 0;
+    ap2010_midi_reset(&beena_midi, beena_midi_rom);
 	beena_sensor_regs[0] = 7;
 	beena_sensor_regs[0x2c/4] = 0xffffffff;
 	beena_sensor_regs[0x30/4] = 0x00ffffff;
@@ -1321,7 +1401,8 @@ static MACHINE_INIT( beena )
 	beena_pcm_fifo_fast_size = 0; beena_pcm_fifo_fast_head = 0; beena_pcm_fifo_fast_tail = 0;
 	beena_pcm_volume = 0.0f;
 	beena_pcm_sample_rate = 8000;
-	if (beena_pcm_stream >= 0) stream_set_sample_rate(beena_pcm_stream, beena_pcm_sample_rate);
+	beena_pcm_phase = 0;
+	beena_pcm_sample = 0;
 	beena_next_scanline = 0;
 	beena_scanline_timer = timer_alloc(beena_scanline_callback);
 	timer_adjust(beena_scanline_timer, cpu_getscanlinetime(0), 0, 0);
@@ -1347,6 +1428,7 @@ MACHINE_DRIVER_END
 
 static DRIVER_INIT( beena )
 {
+    int i;
 	beena_init();
 	/* Mapped RAM is registered by register_banks(); private device state is explicit. */
 	state_save_register_UINT32("beena", 0, "tiles_layers", (UINT32 *)beena_tiles_layers, 0x80000/4);
@@ -1364,6 +1446,58 @@ static DRIVER_INIT( beena )
 	state_save_register_UINT16("beena", 0, "rtc", beena_rtc, 0x100/2);
 	state_save_register_UINT32("beena", 0, "midi_regs", beena_midi_regs, 0x20/4);
 	state_save_register_UINT32("beena", 0, "midi_busy", &beena_midi_busy, 1);
+	state_save_register_UINT8("ap2010midi", 0, "fifo", beena_midi.fifo, AP2010_MIDI_FIFO);
+    state_save_register_UINT32("ap2010midi", 0, "head", &beena_midi.head, 1);
+    state_save_register_UINT32("ap2010midi", 0, "count", &beena_midi.count, 1);
+    state_save_register_UINT32("ap2010midi", 0, "serial", &beena_midi.serial, 1);
+    state_save_register_UINT32("ap2010midi", 0, "tempo", &beena_midi.tempo, 1);
+    state_save_register_UINT32("ap2010midi", 0, "divisor", &beena_midi.divisor, 1);
+    state_save_register_UINT32("ap2010midi", 0, "pending_tempo", &beena_midi.pending_tempo, 1);
+    state_save_register_UINT8("ap2010midi", 0, "running", &beena_midi.running, 1);
+    state_save_register_UINT8("ap2010midi", 0, "pending", &beena_midi.pending, 1);
+    state_save_register_UINT8("ap2010midi", 0, "status", &beena_midi.status, 1);
+    state_save_register_UINT8("ap2010midi", 0, "a", &beena_midi.a, 1);
+    state_save_register_UINT8("ap2010midi", 0, "b", &beena_midi.b, 1);
+    state_save_register_UINT8("ap2010midi", 0, "ended", &beena_midi.ended, 1);
+    state_save_register_UINT8("ap2010midi", 0, "error", &beena_midi.error, 1);
+    state_save_register_double("ap2010midi", 0, "clock", &beena_midi.clock, 1);
+    state_save_register_double("ap2010midi", 0, "deadline", &beena_midi.deadline, 1);
+    state_save_register_double("ap2010midi", 0, "native_fraction", &beena_midi.native_fraction, 1);
+    state_save_register_double("ap2010midi", 0, "previous_l", &beena_midi.previous_l, 1);
+    state_save_register_double("ap2010midi", 0, "previous_r", &beena_midi.previous_r, 1);
+    state_save_register_double("ap2010midi", 0, "current_l", &beena_midi.current_l, 1);
+    state_save_register_double("ap2010midi", 0, "current_r", &beena_midi.current_r, 1);
+    for (i = 0; i < 16; i++) {
+        state_save_register_UINT8("ap2010channel", i, "program", &beena_midi.channel[i].program, 1);
+        state_save_register_UINT8("ap2010channel", i, "volume", &beena_midi.channel[i].volume, 1);
+        state_save_register_UINT8("ap2010channel", i, "expression", &beena_midi.channel[i].expression, 1);
+        state_save_register_UINT8("ap2010channel", i, "pan", &beena_midi.channel[i].pan, 1);
+        state_save_register_UINT8("ap2010channel", i, "sustain", &beena_midi.channel[i].sustain, 1);
+        state_save_register_UINT8("ap2010channel", i, "rpn_msb", &beena_midi.channel[i].rpn_msb, 1);
+        state_save_register_UINT8("ap2010channel", i, "rpn_lsb", &beena_midi.channel[i].rpn_lsb, 1);
+        state_save_register_UINT8("ap2010channel", i, "bend_range", &beena_midi.channel[i].bend_range, 1);
+        state_save_register_UINT16("ap2010channel", i, "bend", &beena_midi.channel[i].bend, 1);
+    }
+    for (i = 0; i < AP2010_MIDI_VOICES; i++) {
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "active", &beena_midi.voice[i].active, 1);
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "channel", &beena_midi.voice[i].channel, 1);
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "note", &beena_midi.voice[i].note, 1);
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "velocity", &beena_midi.voice[i].velocity, 1);
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "released", &beena_midi.voice[i].released, 1);
+        state_save_register_UINT8(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "held", &beena_midi.voice[i].held, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "zone", &beena_midi.voice[i].zone, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "sample", &beena_midi.voice[i].sample, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "length", &beena_midi.voice[i].length, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "loop", &beena_midi.voice[i].loop, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "envelope", &beena_midi.voice[i].envelope, 1);
+        state_save_register_UINT16(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "modulation", &beena_midi.voice[i].modulation, 1);
+        state_save_register_UINT32(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "age", &beena_midi.voice[i].age, 1);
+        state_save_register_UINT32(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "serial", &beena_midi.voice[i].serial, 1);
+        state_save_register_double(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "position", &beena_midi.voice[i].position, 1);
+        state_save_register_float(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "step", &beena_midi.voice[i].step, 1);
+        state_save_register_float(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "level", &beena_midi.voice[i].level, 1);
+        state_save_register_float(i < 16 ? "ap2010voice0" : "ap2010voice1", i & 15, "vibrato", &beena_midi.voice[i].vibrato, 1);
+    }
 	state_save_register_UINT8("beena", 0, "memcache", beena_memcache, 0x800);
 	state_save_register_UINT32("beena", 0, "mc_seq", &beena_mc_seq, 1);
 	state_save_register_UINT32("beena", 0, "mc_addr", &beena_mc_addr, 1);
@@ -1381,6 +1515,8 @@ static DRIVER_INIT( beena )
 	state_save_register_UINT32("beena", 0, "pcm_regs", beena_pcm_regs, 0x40/4);
 	state_save_register_float("beena", 0, "pcm_volume", &beena_pcm_volume, 1);
 	state_save_register_UINT32("beena", 0, "pcm_sample_rate", &beena_pcm_sample_rate, 1);
+	state_save_register_UINT16("beena", 0, "pcm_phase", &beena_pcm_phase, 1);
+	state_save_register_INT16("beena", 0, "pcm_sample", &beena_pcm_sample, 1);
 	state_save_register_UINT16("beena", 0, "pcm_fifo_data", beena_pcm_fifo_data, PCM_FIFO_MAX);
 	state_save_register_UINT16("beena", 0, "pcm_fifo_size", &beena_pcm_fifo_size, 1);
 	state_save_register_UINT16("beena", 0, "pcm_fifo_head", &beena_pcm_fifo_head, 1);
