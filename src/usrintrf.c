@@ -3363,6 +3363,10 @@ int handle_user_interface(struct mame_bitmap *bitmap)
 {
 	DoCheat(bitmap);	/* This must be called once a frame */
 
+#ifdef __EMSCRIPTEN__
+	/* Keep the legacy setup menu closed; the host frontend configures input. */
+	options.display_setup = 0;
+#endif
 	if (setup_selected == 0)
   {
     if(input_ui_pressed(IPT_UI_CONFIGURE) || options.display_setup)

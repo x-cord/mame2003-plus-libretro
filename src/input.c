@@ -853,6 +853,11 @@ int input_ui_pressed(int code)
 {
 	int pressed;
 
+#ifdef __EMSCRIPTEN__
+	/* The host frontend provides configuration instead of MAME's setup menu. */
+	if (code == IPT_UI_CONFIGURE) return 0;
+#endif
+
 	profiler_mark(PROFILER_INPUT);
 
 	pressed = seq_pressed(input_port_type_seq(code));
