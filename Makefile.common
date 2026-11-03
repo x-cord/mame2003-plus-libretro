@@ -291,6 +291,8 @@ SOURCES_C += \
 	$(CORE_DIR)/machine/acitya.c \
 	$(CORE_DIR)/drivers/jrpacman.c \
 	$(CORE_DIR)/vidhrdw/pacman_vidhrdw.c \
+	$(CORE_DIR)/drivers/brew.c \
+	$(CORE_DIR)/sound/brew_smaf.c \
 	$(CORE_DIR)/drivers/pengo.c \
 	$(CORE_DIR)/drivers/epos.c \
 	$(CORE_DIR)/vidhrdw/epos_vidhrdw.c \
@@ -2896,6 +2898,7 @@ SOURCES_C += \
 	$(LIBRETRO_COMM_DIR)/streams/memory_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/rzip_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/stdin_stream.c \
+	$(LIBRETRO_COMM_DIR)/formats/png/rpng.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_pipe.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_zlib.c \
