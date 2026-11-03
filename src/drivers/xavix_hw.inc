@@ -946,9 +946,112 @@ void XavixTV::draw_tilemap_line(screen_device &screen, bitmap_rgb32 &bitmap, con
 }
 void XavixTV::draw_sprites(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
-	for (int y = cliprect.top(); y <= cliprect.bottom(); y++)
+	if (cliprect.top() > cliprect.bottom()) return;
+	m_spritereg &= 0x7f;
+
+	int alt_addressing = 0;
+	if ((m_spritereg == 0x00) || (m_spritereg == 0x01) || (m_spritereg == 0x05))
+		alt_addressing = 1;
+	else if (m_spritereg == 0x02)
+		alt_addressing = 2;
+	else if (m_spritereg == 0x04)
+		alt_addressing = 0;
+	else if (m_spritereg == 0x07)
+		alt_addressing = 3;
+
+	uint8_t* spr_attr0 = m_fragment_sprite + 0x000;
+	uint8_t* spr_attr1 = m_fragment_sprite + 0x100;
+	uint8_t* spr_ypos = m_fragment_sprite + 0x200;
+	uint8_t* spr_xpos = m_fragment_sprite + 0x300;
+	uint8_t* spr_xposh = m_fragment_sprite + 0x400;
+	uint8_t* spr_addr_lo = m_fragment_sprite + 0x500;
+	uint8_t* spr_addr_md = m_fragment_sprite + 0x600;
+	uint8_t* spr_addr_hi = m_fragment_sprite + 0x700;
+
+	for (int i = 0xff; i >= 0; i--)
 	{
-		draw_sprites_line(screen, bitmap, cliprect, y);
+		int attr1 = spr_attr1[i];
+		int drawheight = (attr1 & 0x08) ? 16 : 8;
+		int drawwidth = (attr1 & 0x04) ? 16 : 8;
+
+		int ypos = spr_ypos[i] ^ 0xff;
+		if (ypos & 0x80)
+			ypos = -0x80 + (ypos & 0x7f);
+		else
+			ypos &= 0x7f;
+		ypos += 128 + 1 - (drawheight / 2);
+		if (i < 16) ypos += logo_sprite_y_adjust;
+
+		int spritelowy = ypos;
+		int spritehighy = ypos + drawheight;
+
+		int y_start = std::max(spritelowy, cliprect.top());
+		int y_end = std::min(spritehighy - 1, cliprect.bottom());
+		if (y_start > y_end)
+			continue;
+
+		int xpos = spr_xpos[i] | ((spr_xposh[i] & 1) << 8);
+		xpos ^= 0x100;
+		xpos -= (drawwidth / 2);
+		xpos -= 0x80;
+
+		if (!cliprect.overlapsx(xpos * m_video_hres_multiplier, (xpos + drawwidth) * m_video_hres_multiplier - 1))
+			continue;
+
+		int tile = spr_addr_lo[i];
+		if ((m_spritereg & 0x7f) != 0x00)
+			tile |= (spr_addr_md[i] << 8);
+		if (((m_spritereg & 0x7f) == 0x04) || ((m_spritereg & 0x7f) == 0x07) || ((m_spritereg & 0x7f) == 0x15))
+			tile |= (spr_addr_hi[i] << 16);
+
+		int attr0 = spr_attr0[i];
+		int pal = (attr0 & 0xf0) >> 4;
+		int zval = (attr1 & 0xf0) >> 4;
+		int flipx = m_disable_sprite_xflip ? 0 : (attr1 & 0x01);
+		int flipy = m_disable_sprite_yflip ? 0 : (attr1 & 0x02);
+		int bpp = ((attr0 & 0x0e) >> 1) + 1;
+
+		if (alt_addressing != 0)
+		{
+			if (alt_addressing == 1)
+			{
+				tile = (tile * drawheight * drawwidth * bpp) / 8;
+				int gfxbase = (m_segment_regs[1] << 16) | (m_segment_regs[0] << 8);
+				tile += gfxbase;
+				if (m_ext_segment_regs)
+				{
+					int gfxbase_ext = (m_ext_segment_regs[3] << 24) |
+									  (m_ext_segment_regs[2] << 16) |
+									  (m_ext_segment_regs[1] << 8) |
+									  (m_ext_segment_regs[0] << 0);
+					tile += gfxbase_ext;
+				}
+			}
+			else if (alt_addressing == 2)
+			{
+				tile = tile * 8;
+				int basereg = (tile & 0xf0000) >> 16;
+				tile &= 0xffff;
+				int gfxbase = (m_segment_regs[(basereg * 2) + 1] << 16) | (m_segment_regs[(basereg * 2)] << 8);
+				tile += gfxbase;
+			}
+			else if (alt_addressing == 3)
+			{
+				tile = tile * 8;
+			}
+			else
+			{
+				int basereg = (tile & 0xf0000) >> 16;
+				tile &= 0xffff;
+				int gfxbase = (m_segment_regs[(basereg * 2) + 1] << 16) | (m_segment_regs[(basereg * 2)] << 8);
+				tile += gfxbase;
+			}
+		}
+
+		for (int line = y_start; line <= y_end; line++)
+		{
+			draw_tile_line(screen, bitmap, cliprect, tile, bpp, xpos, line, drawheight, drawwidth, flipx, flipy, pal, zval, line - spritelowy);
+		}
 	}
 }
 void XavixTV::draw_sprites_line(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect, int line)
@@ -1174,7 +1277,10 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	if (!cliprect.containsy(ypos))
 		return;
 
-	if (!cliprect.overlapsx(xpos * m_video_hres_multiplier, ((xpos + drawwidth) * m_video_hres_multiplier) - 1))
+	const int hres = m_video_hres_multiplier;
+	const int x_start = xpos * hres;
+	const int x_end = (xpos + drawwidth) * hres - 1;
+	if (x_end < cliprect.min_x || x_start > cliprect.max_x)
 		return;
 
 	const bool effect_icon = ekara_effect_icon(tile, bpp, pal);
@@ -1186,7 +1292,8 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	if (bpp>4)
 		pal &= (0xf<<(bpp-4));
 
-	int bits_per_tileline = drawwidth * bpp;
+	const int pal_base = pal << 4;
+	const int bits_per_tileline = drawwidth * bpp;
 
 	// set the address here so we can increment in bits in the draw function
 	set_data_address(tile, 0);
@@ -1194,39 +1301,51 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	if (flipy)
 		line = (drawheight - 1) - line;
 
-	m_tmp_dataaddress = m_tmp_dataaddress + ((line * bits_per_tileline) / 8);
+	m_tmp_dataaddress += (line * bits_per_tileline) / 8;
 	m_tmp_databit = (line * bits_per_tileline) % 8;
 
-	for (int x = 0; x < drawwidth; x++)
+	uint16_t *const zyposptr = &m_zbuffer.pix(ypos);
+	pen_t *const bitmap_row = &bitmap.pix(ypos);
+	uint8_t *const reg_cov = regular_coverage ? regular_coverage + ypos * 512 : nullptr;
+
+	if (hres == 1)
 	{
-		int col;
-		if (flipx)
+		for (int x = 0; x < drawwidth; x++)
 		{
-			col = xpos + (drawwidth - 1) - x;
-		}
-		else
-		{
-			col = xpos + x;
-		}
+			int col = flipx ? (xpos + (drawwidth - 1) - x) : (xpos + x);
+			uint8_t dat = 0;
+			get_tile_pixel_dat(dat, bpp);
 
-		uint8_t dat = 0;
-
-		get_tile_pixel_dat(dat, bpp);
-
-		col = col * m_video_hres_multiplier;
-
-		// High-resolution bitmap pixels have independent priorities beneath doubled tiles.
-		for (int pixel = col; pixel < col + m_video_hres_multiplier; pixel++)
-		{
-			if (!cliprect.containsx(pixel)) continue;
-			uint16_t *const zyposptr = &m_zbuffer.pix(ypos);
-			if (zval < zyposptr[pixel]) continue;
-			int pen = (dat + (pal << 4)) & 0xff;
+			if (col < cliprect.min_x || col > cliprect.max_x) continue;
+			if (zval < zyposptr[col]) continue;
+			int pen = (dat + pal_base) & 0xff;
 			if ((palram_sh[pen] & 0x1f) < 24)
 			{
-				bitmap.pix(ypos, pixel) = paldata[pen];
-				zyposptr[pixel] = zval;
-				if (regular_coverage) regular_coverage[ypos*512+pixel] = 1;
+				bitmap_row[col] = paldata[pen];
+				zyposptr[col] = zval;
+				if (reg_cov) reg_cov[col] = 1;
+			}
+		}
+	}
+	else
+	{
+		for (int x = 0; x < drawwidth; x++)
+		{
+			int col = (flipx ? (xpos + (drawwidth - 1) - x) : (xpos + x)) * hres;
+			uint8_t dat = 0;
+			get_tile_pixel_dat(dat, bpp);
+
+			for (int pixel = col; pixel < col + hres; pixel++)
+			{
+				if (!cliprect.containsx(pixel)) continue;
+				if (zval < zyposptr[pixel]) continue;
+				int pen = (dat + pal_base) & 0xff;
+				if ((palram_sh[pen] & 0x1f) < 24)
+				{
+					bitmap_row[pixel] = paldata[pen];
+					zyposptr[pixel] = zval;
+					if (reg_cov) reg_cov[pixel] = 1;
+				}
 			}
 		}
 	}

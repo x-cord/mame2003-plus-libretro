@@ -75,24 +75,27 @@ void xavix_sound_device::sound_stream_update(sound_stream &stream)
 	int out_pos = 0;
 	int num_samples = stream.samples();
 
+	const uint8_t *visit_order = m_mix.dac ? MIXER_ORDER_BROADCAST : MIXER_ORDER_MULTIPLEX;
+	const uint8_t cap = m_mix.capacity & 0x03;
+	const int allowed_channels = (cap & 0x02) ? 4 : (cap & 0x01) ? 8 : 16;
+	const int amp = int(m_mix.gain);
+	// Post-mix gain uses a 3/128 factor for the hardware divider.
+	const int64_t gain_factor = int64_t(amp) * int64_t(allowed_channels) * 3;
+
+	auto apply_final_gain = [gain_factor](int64_t x) -> int64_t
+	{
+		int64_t y = x * gain_factor;
+		return (y >= 0) ? ((y + 64) >> 7) : -(((-y) + 64) >> 7);
+	};
+
 	while (num_samples-- != 0)
 	{
-		const uint8_t (&visit_order)[16] = m_mix.dac ? MIXER_ORDER_BROADCAST : MIXER_ORDER_MULTIPLEX;
-
-		// capacity (00=16ch, 01=8ch, 1x=4ch), applied to the *visit order* like the hardware does.
-		const uint8_t cap = m_mix.capacity & 0x03;
-		const int allowed_channels = (cap & 0x02) ? 4 : (cap & 0x01) ? 8 : 16;
- (void)0;
-
 		int64_t total_l = 0;
 		int64_t total_r = 0;
 
 		// visit voices in the observed hardware order; drop anything past the capacity window
-		for (int idx = 0; idx < 16; idx++)
+		for (int idx = 0; idx < allowed_channels; idx++)
 		{
-			if (idx >= allowed_channels)
-				continue;
-
 			const int v = visit_order[idx];
 			if (!m_voice[v].enabled)
 				continue;
@@ -181,20 +184,6 @@ void xavix_sound_device::sound_stream_update(sound_stream &stream)
 				continue;
 			}
 		}
-
-		auto apply_final_gain =
-			[cap = uint8_t(m_mix.capacity & 0x03), amp = int(m_mix.gain)] (int64_t x) -> int64_t
-			{
-				// capacity: 00=16ch, 01=8ch, 1x=4ch
-				const int allowed = (cap & 0x02) ? 4 : (cap & 0x01) ? 8 : 16;
-
-				// post-mix is multiplied by the amp code and divided by ~1000;
-				// approximate that non-power-of-two divide with a 3/128 fixed-point factor.
-				// this is imperfect as it will depend on the analgue path implementation surrounding the XaviX core
-				// which will likely vary based on the physical characteristics of the device.
-				int64_t y = x * int64_t(amp) * int64_t(allowed) * 3;
-				return (y >= 0) ? ((y + 64) >> 7) : -(((-y) + 64) >> 7);
-			};
 
 		total_l = apply_final_gain(total_l);
 		total_r = apply_final_gain(total_r);
