@@ -1,3 +1,5 @@
+CPUDEFS += -DHAS_XAVIX=1
+SOURCES_CXX += $(CORE_DIR)/drivers/xavix_port.cpp
 LIBRETRO_COMM_DIR := $(CORE_DIR)/libretro-common
 
 INCFLAGS := \
@@ -291,6 +293,7 @@ SOURCES_C += \
 	$(CORE_DIR)/machine/acitya.c \
 	$(CORE_DIR)/drivers/jrpacman.c \
 	$(CORE_DIR)/vidhrdw/pacman_vidhrdw.c \
+	$(CORE_DIR)/drivers/xavixtv.c \
 	$(CORE_DIR)/drivers/pengo.c \
 	$(CORE_DIR)/drivers/epos.c \
 	$(CORE_DIR)/vidhrdw/epos_vidhrdw.c \

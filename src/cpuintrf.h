@@ -311,6 +311,9 @@ enum
 #if (HAS_ARM7LE)
 	CPU_ARM7LE,
 #endif
+#if (HAS_XAVIX)
+	CPU_XAVIX,
+#endif
 #if (HAS_SH2)
 	CPU_SH2,
 #endif

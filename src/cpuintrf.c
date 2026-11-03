@@ -13,6 +13,9 @@
 #include "driver.h"
 #include "state.h"
 #include "mamedbg.h"
+#if (HAS_XAVIX)
+#include "cpu/xavix/xavix.h"
+#endif
 
 
 
@@ -668,6 +671,9 @@ const struct cpu_interface cpuintrf[] =
 #endif
 #if (HAS_ARM7LE)
 	CPU0(ARM7LE,  arm7le, 	 5,  0,1.00,32,32ledw, 0,32,LE,4, 4	),
+#endif
+#if (HAS_XAVIX)
+	CPU0(XAVIX,   xavix, 	 1,  0,1.00, 8, 24,	  0,24,LE,1, 4	),
 #endif
 #if (HAS_SH2)
 	CPU4(SH2,	   sh2, 	16,  0,1.00,32,32bedw,   0,32,BE,2, 2  ),
