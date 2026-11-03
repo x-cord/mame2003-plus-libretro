@@ -1176,7 +1176,9 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 	if (!cliprect.overlapsx(xpos * m_video_hres_multiplier, ((xpos + drawwidth) * m_video_hres_multiplier) - 1))
 		return;
 
-	const pen_t *paldata = m_palette->pens();
+	const bool effect_icon = ekara_effect_icon(tile, bpp, pal);
+	const pen_t *paldata = effect_icon ? ekara_effect_palette.pens() : m_palette->pens();
+	const uint8_t *palram_sh = effect_icon ? bios + 0x8e20 : m_palram_sh;
 
 	// if bpp>4 then ignore unaligned palette selects bits based on bpp
 	// ttv_lotr uses 5bpp graphics (so 32 colour alignment) but sets palette 0xf (a 16 colour boundary) when it expects palette 0xe
@@ -1219,7 +1221,7 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 			uint16_t *const zyposptr = &m_zbuffer.pix(ypos);
 			if (zval < zyposptr[pixel]) continue;
 			int pen = (dat + (pal << 4)) & 0xff;
-			if ((m_palram_sh[pen] & 0x1f) < 24)
+			if ((palram_sh[pen] & 0x1f) < 24)
 			{
 				bitmap.pix(ypos, pixel) = paldata[pen];
 				zyposptr[pixel] = zval;

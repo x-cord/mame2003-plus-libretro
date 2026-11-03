@@ -82,6 +82,11 @@ static struct CursorInput {
  bool keyboard=false, seen=false;
  int host[2]{};
 } cursor_input;
+static int ekara_effect_profile = 0;
+static Palette ekara_effect_palette;
+struct EkaraEffectState { uint8_t echo=0, effect=0, active=0, previous=0; };
+static uint8_t ekara_effect_report[3]{};
+static EkaraEffectState ekara_effect_hardware;
 struct XavixTV {
  #include "xavix_members.inc"
  #include "xavix_decls.inc"
@@ -187,7 +192,7 @@ struct XavixTV {
   int index=0;uint8_t sel=extraioselect&0x7f;
   if(!sel||(sel&(sel-1)))return 0;
   while(sel>1){sel>>=1;index++;}
-  uint8_t value=xavix_host_input(index<4?2:3);index=index<4?index:index-4;
+  uint8_t value=(ekara_effect_profile==3 && index>=4)?0:xavix_host_input(index<4?2:3);index=index<4?index:index-4;
   return (value>>(2*index))&3;
  }
  void write_io0(uint8_t d,uint8_t dir) {extraioselect=d&dir;}
@@ -211,6 +216,19 @@ struct XavixTV {
  void reprogram_sound_timer(int i) {double hz=sound.tempo_tick_hz(m_tp[i]);if(!(m_sound_irqstatus&(1<<i))||!m_tp[i]||hz<=0)xavix_host_timer(2+i,1e30,0);else xavix_host_timer(2+i,1/hz,1/hz);}
 };
 static XavixTV tv;
+extern "C" unsigned char *xavix_tv_ram(void) { return tv.ram; }
+// The scoring cartridges retain the ordinary e-kara effect UI but do not
+// install it during karaoke. Its preset scratch byte overlaps the scoring
+// microphone buffer size; leave that byte alone while karaoke is active.
+static bool ekara_effect_song() {
+ if(ekara_effect_profile==1) return tv.ram[0x16b2]==4 && tv.ram[0x1658]==6 && tv.ram[0x165b]==2;
+ if(ekara_effect_profile==2) return tv.ram[0x172a]==4 && tv.ram[0x1678]==6 && tv.ram[0x167b]==2;
+ return false;
+}
+static bool ekara_effect_icon(int tile,int bpp,int pal) {
+ unsigned address=tile&0x7fffff;
+ return pal==15 && bpp==4 && address>=0x694a00 && address<0x695800 && ekara_effect_song();
+}
 #include "xavix_hw.inc"
 
 static uint8_t low_read(uint16_t a) {
@@ -271,6 +289,10 @@ static void ext_write(uint32_t a,uint8_t d) {
  if(tv.super && a>=0x600000&&a<=0x67ffff)tv.bitmap_buffer[a-0x600000]=d;
 }
 static uint8_t opcode_read(uint32_t a) {
+ if(ekara_effect_song()) {
+  unsigned patch=ekara_effect_profile==1?0xd94b:0xc6cf;
+  if(a==patch || a==patch+1) return 0xea;
+ }
  if(!(a&0x800000)&&!(a&0x8000))return low_read(a&0x7fff);
  return ext_read(a&0x7fffff);
 }
@@ -287,6 +309,17 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  ekara_microphone.reset();
  new (&tv) XavixTV{};
  tv.super=super;tv.bios=bios;tv.cart=cart;
+ ekara_effect_profile=0;ekara_effect_hardware=EkaraEffectState{};
+ if(!super && cart[0xd94b]==0x85 && cart[0xd94c]==0x76 && cart[0xd974]==0xa5 && cart[0xd975]==0x46) ekara_effect_profile=1;
+ if(!super && cart[0xc6cf]==0x85 && cart[0xc6d0]==0x76 && cart[0xc6f8]==0xa5 && cart[0xc6f9]==0x46) ekara_effect_profile=2;
+ static const uint8_t gk1_signature[]={0x1a,0xad,0xbc,0x1a,0x8d,0xb9,0x1a,0xad,0xbd,0x1a,0x8d,0xba,0x1a,0x4c,0x4a,0x80};
+ if(!super && !memcmp(cart+0x8000,gk1_signature,sizeof(gk1_signature))) ekara_effect_profile=3;
+ // Saiten lyrics occupy palette F; status icons retain the BIOS UI colors.
+ if(ekara_effect_profile==1 || ekara_effect_profile==2) {
+  tv.m_palette=&ekara_effect_palette;
+  for(int i=0;i<16;i++)tv.update_pen(0xf0+i,bios[0x8f10+i],bios[0x9010+i]);
+  tv.m_palette=&tv.palette;
+ }
  tv.m_video_hres_multiplier=super?2:1;
  tv.m_disable_memory_bypass=super;
  tv.m_ext_segment_regs=super?tv.ram+0x6a40:nullptr;
@@ -303,10 +336,25 @@ extern "C" unsigned char xavix_tv_read(unsigned a) {return opcode_read(a);}
 extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
 extern "C" void xavix_tv_input_sync() {
  stvpc_printer.reset();
+ if(ekara_effect_profile==3) {
+  ekara_effect_hardware.previous=xavix_host_input(3)&3;
+  ekara_effect_hardware.active=(xavix_host_input(2)&1)!=0;
+ }
  stvpc_keyboard.sent_pads[0]=stvpc_keyboard.sent_pads[1]=0xff;
  ekara_microphone.reset();
 }
 extern "C" void xavix_tv_vblank() {
+ if(ekara_effect_profile==3) {
+  uint8_t held=xavix_host_input(3)&3, pressed=held&~ekara_effect_hardware.previous;
+  if(pressed&1) ekara_effect_hardware.echo=(ekara_effect_hardware.echo+1)%4;
+  if(pressed&2) ekara_effect_hardware.effect=(ekara_effect_hardware.effect+1)%3;
+  ekara_effect_hardware.previous=held;
+  ekara_effect_hardware.active=(xavix_host_input(2)&1)!=0;
+ }
+ if(ekara_effect_song()) {
+  unsigned slot=ekara_effect_profile==1?0x1659:0x1679;
+  if(!tv.ram[slot] && !tv.ram[slot+1]) tv.ram[slot]=1;
+ }
  if(tv.super) {
   uint64_t keys=0;
   for(int i=0;i<8;i++)keys|=uint64_t(xavix_host_input(3+i))<<(i*8);
@@ -436,6 +484,7 @@ extern "C" unsigned xavix_dasm(char *s,unsigned pc) {sprintf(s,"$%02x",opcode_re
 
 extern "C" void xavix_tv_register_state(void) {
 #define SAVE(v) xavix_host_save(#v,&(v),sizeof(v))
+ if(ekara_effect_profile==3) SAVE(ekara_effect_hardware);
 
  // The controller can be mid-packet at a frame boundary. Preserve the wire
  // and pending edges so restoring a state cannot manufacture or stick keys.
