@@ -961,3 +961,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void *ekara_effect_state() {
  return ekara_effect_report;
 }
 #endif
+
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void xavix_set_cart_eeprom(int enable) { xavix_tv_set_cart_eeprom(enable); }
+#endif
