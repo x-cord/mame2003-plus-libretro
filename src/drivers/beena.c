@@ -88,6 +88,8 @@ static void beena_restore_book_pen(void)
 {
 	beena_book_contact = 0;
 	beena_selected_page %= beena_book_positions();
+	beena_pen_keys = readinputport(4) & 2;
+	beena_page_keys = readinputport(5);
 }
 
 /* Page and pen keyboard input share the positions used by the frontend. */
@@ -114,6 +116,9 @@ static void beena_update_page(void)
 static UINT8  beena_requested_fiq;
 static UINT32 beena_irq_wait_start_addr;
 static UINT32 beena_vbl_count;
+static mame_timer *beena_scanline_timer;
+static UINT16 beena_next_scanline;
+static double beena_scanline_timeleft;
 
 static UINT8 *beena_cart_base;
 static UINT32 *beena_cart_ram;
@@ -936,7 +941,8 @@ static void beena_scanline_callback(int param)
 	beena_request_fiq();
 	param++;
 	if (param >= SCREEN_H) param = 0;
-	timer_set(cpu_getscanlinetime(param), param, beena_scanline_callback);
+	beena_next_scanline = param;
+	timer_adjust(beena_scanline_timer, cpu_getscanlinetime(param), param, 0);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -952,7 +958,7 @@ static void beena_scanline_callback(int param)
 
 static UINT32 beena_pcm_regs[0x40 / 4];
 static float  beena_pcm_volume;
-static UINT32 beena_pcm_sample_rate;
+static UINT32 beena_pcm_sample_rate = 8000;
 static UINT16 beena_pcm_fifo_data[PCM_FIFO_MAX];
 static UINT16 beena_pcm_fifo_size, beena_pcm_fifo_head, beena_pcm_fifo_tail;
 static UINT16 beena_pcm_fifo_fast_data[PCM_FIFO_MAX];
@@ -1011,8 +1017,6 @@ static void beena_pcm_stream_callback(int param, INT16 *buffer, int length)
 static void beena_pcm_init_stream(void)
 {
 	if (beena_pcm_stream >= 0) return;
-	beena_pcm_sample_rate = 8000;
-	beena_pcm_volume = 0.0f;
 	beena_pcm_stream = stream_init("AP2010PCM", 100, beena_pcm_sample_rate, 0,
 			beena_pcm_stream_callback);
 }
@@ -1071,6 +1075,24 @@ static WRITE32_HANDLER( beena_pcm_w )
 			}
 			break;
 	}
+}
+
+static void beena_presave(void)
+{
+	if (beena_pcm_stream >= 0) stream_update(beena_pcm_stream, 0);
+	beena_scanline_timeleft = timer_timeleft(beena_scanline_timer);
+}
+
+static void beena_postload(void)
+{
+	UINT32 i;
+	beena_restore_book_pen();
+	arm7_clear_hotspots();
+	if (!(readinputport(9) & 0x10) && beena_irq_wait_start_addr != 0xffffffff)
+		for (i = 0; i < 5; i++) arm7_add_hotspot(beena_irq_wait_start_addr + i * 4);
+	timer_adjust(beena_scanline_timer, beena_scanline_timeleft, beena_next_scanline, 0);
+	beena_pcm_init_stream();
+	if (beena_pcm_stream >= 0) stream_set_sample_rate(beena_pcm_stream, beena_pcm_sample_rate);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -1266,6 +1288,7 @@ static void beena_init(void)
 	memset(beena_paletteram, 0, 0x200*4);
 
 	beena_scale = 1;
+	beena_pcm_stream = -1;
 	beena_irq_wait_start_addr = 0xffffffff;
 	for (i = 0; i < 0x100/2; i++)
 		beena_rtc[i] = 0;
@@ -1297,7 +1320,11 @@ static MACHINE_INIT( beena )
 	beena_pcm_fifo_size = 0; beena_pcm_fifo_head = 0; beena_pcm_fifo_tail = 0;
 	beena_pcm_fifo_fast_size = 0; beena_pcm_fifo_fast_head = 0; beena_pcm_fifo_fast_tail = 0;
 	beena_pcm_volume = 0.0f;
-	timer_set(cpu_getscanlinetime(0), 0, beena_scanline_callback);
+	beena_pcm_sample_rate = 8000;
+	if (beena_pcm_stream >= 0) stream_set_sample_rate(beena_pcm_stream, beena_pcm_sample_rate);
+	beena_next_scanline = 0;
+	beena_scanline_timer = timer_alloc(beena_scanline_callback);
+	timer_adjust(beena_scanline_timer, cpu_getscanlinetime(0), 0, 0);
 }
 
 static MACHINE_DRIVER_START( beena )
@@ -1321,6 +1348,47 @@ MACHINE_DRIVER_END
 static DRIVER_INIT( beena )
 {
 	beena_init();
+	/* Mapped RAM is registered by register_banks(); private device state is explicit. */
+	state_save_register_UINT32("beena", 0, "tiles_layers", (UINT32 *)beena_tiles_layers, 0x80000/4);
+	state_save_register_UINT32("beena", 0, "tiles_sprites", (UINT32 *)beena_tiles_sprites, 0x80000/4);
+	state_save_register_UINT32("beena", 0, "video_regs", beena_video_regs, 0x100/4);
+	state_save_register_UINT16("beena", 0, "pal_base", beena_pal_base, 0x100);
+	state_save_register_UINT16("beena", 0, "pal_cache", beena_pal_cache, SCREEN_H * 0x100);
+	state_save_register_UINT8("beena", 0, "scale", &beena_scale, 1);
+	state_save_register_UINT16("beena", 0, "scanline", &beena_scanline, 1);
+	state_save_register_UINT16("beena", 0, "next_scanline", &beena_next_scanline, 1);
+	state_save_register_double("beena", 0, "scanline_timeleft", &beena_scanline_timeleft, 1);
+	state_save_register_UINT8("beena", 0, "requested_fiq", &beena_requested_fiq, 1);
+	state_save_register_UINT32("beena", 0, "irq_wait_start_addr", &beena_irq_wait_start_addr, 1);
+	state_save_register_UINT32("beena", 0, "bios_sr", beena_bios_sr, 0x100/4);
+	state_save_register_UINT16("beena", 0, "rtc", beena_rtc, 0x100/2);
+	state_save_register_UINT32("beena", 0, "midi_regs", beena_midi_regs, 0x20/4);
+	state_save_register_UINT32("beena", 0, "midi_busy", &beena_midi_busy, 1);
+	state_save_register_UINT8("beena", 0, "memcache", beena_memcache, 0x800);
+	state_save_register_UINT32("beena", 0, "mc_seq", &beena_mc_seq, 1);
+	state_save_register_UINT32("beena", 0, "mc_addr", &beena_mc_addr, 1);
+	state_save_register_UINT8("beena", 0, "mc_data", &beena_mc_data, 1);
+	state_save_register_UINT8("beena", 0, "mc_i", &beena_mc_i, 1);
+	state_save_register_UINT8("beena", 0, "mc_state", &beena_mc_state, 1);
+	state_save_register_UINT8("beena", 0, "fsa_data", beena_fsa_data, MEMCACHE_FIFO_MAX);
+	state_save_register_UINT16("beena", 0, "fsa_size", &beena_fsa_size, 1);
+	state_save_register_UINT16("beena", 0, "fsa_head", &beena_fsa_head, 1);
+	state_save_register_UINT16("beena", 0, "fsa_tail", &beena_fsa_tail, 1);
+	state_save_register_UINT8("beena", 0, "fev_data", beena_fev_data, MEMCACHE_FIFO_MAX);
+	state_save_register_UINT16("beena", 0, "fev_size", &beena_fev_size, 1);
+	state_save_register_UINT16("beena", 0, "fev_head", &beena_fev_head, 1);
+	state_save_register_UINT16("beena", 0, "fev_tail", &beena_fev_tail, 1);
+	state_save_register_UINT32("beena", 0, "pcm_regs", beena_pcm_regs, 0x40/4);
+	state_save_register_float("beena", 0, "pcm_volume", &beena_pcm_volume, 1);
+	state_save_register_UINT32("beena", 0, "pcm_sample_rate", &beena_pcm_sample_rate, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_data", beena_pcm_fifo_data, PCM_FIFO_MAX);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_size", &beena_pcm_fifo_size, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_head", &beena_pcm_fifo_head, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_tail", &beena_pcm_fifo_tail, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_fast_data", beena_pcm_fifo_fast_data, PCM_FIFO_MAX);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_fast_size", &beena_pcm_fifo_fast_size, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_fast_head", &beena_pcm_fifo_fast_head, 1);
+	state_save_register_UINT16("beena", 0, "pcm_fifo_fast_tail", &beena_pcm_fifo_fast_tail, 1);
 	state_save_register_UINT8("beena", 0, "selected_page", &beena_selected_page, 1);
 	state_save_register_UINT8("beena", 0, "page_keys", &beena_page_keys, 1);
 	state_save_register_UINT32("beena", 0, "effective_page", &beena_effective_page, 1);
@@ -1328,7 +1396,8 @@ static DRIVER_INIT( beena )
 	state_save_register_UINT8("beena", 0, "pen_keys", &beena_pen_keys, 1);
 	state_save_register_INT32("beena", 0, "pen_x", &beena_book_x, 1);
 	state_save_register_INT32("beena", 0, "pen_y", &beena_book_y, 1);
-	state_save_register_func_postload(beena_restore_book_pen);
+	state_save_register_func_presave(beena_presave);
+	state_save_register_func_postload(beena_postload);
 }
 
 GAME( 2005, beena,       0, beena, beena, beena, ROT0, "Sega Toys", "Advanced Pico BEENA" )
