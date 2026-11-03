@@ -13,6 +13,146 @@
 #include "xavix_port.h"
 #include "ekara_microphone.h"
 static EkaraMicrophone ekara_microphone;
+
+struct EkaraI2C {
+ enum State { IDLE=0, DEVSEL=1, ADDR=2, DATAIN=3, READSELACK=4, DATAOUT=5 };
+ uint8_t data[1024];
+ uint8_t page[16];
+ uint8_t scl=0;
+ uint8_t sdaw=1;
+ uint8_t sdar=1;
+ uint8_t state=IDLE;
+ int bits=0;
+ uint8_t shift=0;
+ uint8_t devsel=0;
+ int byteaddr=0;
+ int page_offset=0;
+ int page_written=0;
+
+ void reset() {
+  memset(data,0xff,sizeof(data));
+  memset(page,0xff,sizeof(page));
+  scl=0; sdaw=1; sdar=1;
+  state=IDLE; bits=0; shift=0; devsel=0;
+  byteaddr=0; page_offset=0; page_written=0;
+ }
+
+ void write_sda(int val) {
+  val&=1;
+  if(sdaw!=val) {
+   sdaw=val;
+   if(scl && sdar) {
+    if(sdaw) {
+     if(page_written>0) {
+      int base=byteaddr&0x3ff;
+      int root=base&~15;
+      for(int i=0;i<page_written;i++) data[root|((base+i)&15)]=page[i];
+      page_written=0;
+     }
+     state=IDLE;
+     bits=0;
+    } else {
+     state=DEVSEL;
+     bits=0;
+     shift=0;
+     page_written=0;
+    }
+   }
+  }
+ }
+
+ void write_scl(int val) {
+  val&=1;
+  if(scl!=val) {
+   scl=val;
+   switch(state) {
+   case DEVSEL:
+   case ADDR:
+   case DATAIN:
+    if(bits<8) {
+     if(scl) {
+      shift=((shift<<1)|sdaw)&0xff;
+      bits++;
+     }
+    } else {
+     if(scl) {
+      bits++;
+     } else {
+      if(bits==8) {
+       switch(state) {
+       case DEVSEL:
+        devsel=shift;
+        if((devsel&0xf0)!=0xa0) {
+         state=IDLE;
+        } else if((devsel&1)==0) {
+         state=ADDR;
+        } else {
+         byteaddr=(byteaddr&0xff)|(((devsel&0x06)<<7)&0x3ff);
+         state=READSELACK;
+        }
+        break;
+       case ADDR:
+        byteaddr=shift|(((devsel&0x06)<<7)&0x3ff);
+        page_offset=0;
+        page_written=0;
+        state=DATAIN;
+        break;
+       case DATAIN:
+        page[page_offset]=shift;
+        page_offset=(page_offset+1)&15;
+        if(page_written<16) page_written++;
+        break;
+       default: break;
+       }
+       if(state!=IDLE) sdar=0;
+      } else {
+       bits=0;
+       sdar=1;
+      }
+     }
+    }
+    break;
+
+   case READSELACK:
+    bits=0;
+    state=DATAOUT;
+    break;
+
+   case DATAOUT:
+    if(bits<8) {
+     if(scl) {
+      bits++;
+     } else {
+      if(bits==0) {
+       shift=data[byteaddr&0x3ff];
+       byteaddr=(byteaddr+1)&0x3ff;
+      }
+      sdar=(shift>>7)&1;
+      shift=(shift<<1)&0xff;
+     }
+    } else {
+     if(scl) {
+      if(sdaw) state=IDLE;
+      bits=0;
+     } else {
+      sdar=1;
+     }
+    }
+    break;
+
+   default: break;
+   }
+  }
+ }
+
+ int read_sda() const {
+  return (state==IDLE) ? (sdaw&1) : (sdar&1);
+ }
+};
+static EkaraI2C ekara_i2c;
+static bool ekara_cart_has_eeprom = false;
+extern "C" void xavix_tv_set_cart_eeprom(int enable) { ekara_cart_has_eeprom = (enable != 0); }
+extern "C" unsigned char *ekara_eeprom_data(void) { return ekara_i2c.data; }
 static double (*xavix_emulated_clock)(void)=nullptr;
 extern "C" void xavix_tv_set_clock(double (*clock)(void)) { xavix_emulated_clock=clock; }
 static uint8_t *xavix_ram_ptr = nullptr;
@@ -290,6 +430,7 @@ static uint8_t ext_read(uint32_t a) {
   if(a>=0x500000&&a<=0x5fffff && (tv.pio_dir[2]&tv.pio_out[2]&4))a+=0x200000;
   return tv.bios[a];
  }
+ if(ekara_cart_has_eeprom && a==0x5fffff && (tv.m_extbusctrl[1]&8))return ekara_i2c.read_sda() ? 255 : 0;
  // GK-1's unpopulated peripheral bus leaves the serial data line high.
  if(ekara_effect_profile==3 && a==0x5fffff && (tv.m_extbusctrl[1]&8))return 255;
  if(a<0x600000)return tv.cart[a&0x1fffff];
@@ -299,6 +440,10 @@ static void ext_write(uint32_t a,uint8_t d) {
  xavix_polling_safe=false;
  a&=0x7fffff;
  if(tv.super && a>=0x600000&&a<=0x67ffff)tv.bitmap_buffer[a-0x600000]=d;
+ if(!tv.super && ekara_cart_has_eeprom && a==0x3fffff && (tv.m_extbusctrl[1]&0x04)) {
+  ekara_i2c.write_sda(d&1);
+  ekara_i2c.write_scl((d>>1)&1);
+ }
 }
 static uint8_t opcode_read(uint32_t a) {
  unsigned patch=ekara_effect_profile==1?0xd94b:0xc6cf;
@@ -320,6 +465,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  stvpc_keyboard.reset();
  cursor_input=CursorInput{};
  ekara_microphone.reset();
+ ekara_i2c.reset();
  new (&tv) XavixTV{};
  xavix_ram_ptr=tv.ram;
  tv.super=super;tv.bios=bios;tv.cart=cart;
@@ -501,6 +647,20 @@ extern "C" unsigned xavix_dasm(char *s,unsigned pc) {sprintf(s,"$%02x",opcode_re
 extern "C" void xavix_tv_register_state(void) {
 #define SAVE(v) xavix_host_save(#v,&(v),sizeof(v))
  if(ekara_effect_profile==3) SAVE(ekara_effect_hardware);
+ if(ekara_cart_has_eeprom) {
+  SAVE(ekara_i2c.data);
+  SAVE(ekara_i2c.page);
+  SAVE(ekara_i2c.scl);
+  SAVE(ekara_i2c.sdaw);
+  SAVE(ekara_i2c.sdar);
+  SAVE(ekara_i2c.state);
+  SAVE(ekara_i2c.bits);
+  SAVE(ekara_i2c.shift);
+  SAVE(ekara_i2c.devsel);
+  SAVE(ekara_i2c.byteaddr);
+  SAVE(ekara_i2c.page_offset);
+  SAVE(ekara_i2c.page_written);
+ }
 
  // The controller can be mid-packet at a frame boundary. Preserve the wire
  // and pending edges so restoring a state cannot manufacture or stick keys.
