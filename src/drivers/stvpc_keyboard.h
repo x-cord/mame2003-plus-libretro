@@ -8,6 +8,7 @@
 // sent as four prefixed bytes (011/010/001/000) separated by one idle bit,
 // which the firmware's decoder consumes before each channel prefix.
 struct StvpcKeyboard {
+ uint8_t pads[2]{}, sent_pads[2]{};
  uint64_t held=0;
  uint8_t queue[128]{}, head=0, tail=0;
  uint64_t packet=0; unsigned remaining=0;
@@ -33,6 +34,12 @@ struct StvpcKeyboard {
  }
  bool start() {
   if(active)return false;
+  // Pad channels carry five held buttons: directions and the action button.
+  for(int i=0;i<2;i++)if(pads[i]!=sent_pads[i]) {
+   active=true;sampled=false;sent_pads[i]=pads[i];
+   packet=((4+i)<<5)|pads[i];remaining=8;
+   return advance();
+  }
   if(head==tail)return rtc_start();
   active=true;sampled=false;
   // Prefix 110 selects the key channel, followed by seven bits, MSB first.
