@@ -230,17 +230,34 @@ static UINT32 brew_object(int type)
     }
     return p;
 }
-static UINT32 brew_reference(unsigned type, unsigned slot)
+/* Display font slots occupy the previously reserved object words 24..56.
+   Font objects retain their class at +4; +8 identifies default Unicode fonts. */
+#define BREW_FONT_FIRST 0x8000
+#define BREW_FONT_COUNT 9
+static int brew_is_object(UINT32 object, unsigned type)
 {
-    UINT32 object = brew_arg(0), refs = brew_u32(object + 60);
-    if (!object || object < BREW_HEAP_BASE + 16 || object >= brew_heap)
+    return object >= BREW_HEAP_BASE + 16 && object < brew_heap
+        && brew_ptr(object, 64) && brew_u32(object - 8) == BREW_BLOCK_MAGIC
+        && brew_u32(object - 12) && brew_u32(object + 60)
+        && brew_u32(object) == BREW_VTABLES + type * 1024;
+}
+static UINT32 brew_ref(UINT32 object, unsigned type, unsigned slot)
+{
+    UINT32 refs = brew_u32(object + 60);
+    if (!brew_is_object(object, type))
         return 0;
     refs = slot == 0 ? refs + 1 : refs ? refs - 1 : 0;
     brew_w32(object + 60, refs);
     if (!refs)
     {
-        if (type == B_DISPLAY && brew_u32(BREW_DISPLAY_STATE) == object)
-            brew_w32(BREW_DISPLAY_STATE, 0);
+        if (type == B_DISPLAY)
+        {
+            unsigned i;
+            if (brew_u32(BREW_DISPLAY_STATE) == object)
+                brew_w32(BREW_DISPLAY_STATE, 0);
+            for (i = 0; i < BREW_FONT_COUNT; i++)
+                brew_ref(brew_u32(object + 24 + i * 4), B_FONT, 1);
+        }
         if (type == B_IMAGE)
             brew_free(brew_u32(object + 16));
         if (type == B_MEDIA)
@@ -257,6 +274,30 @@ static UINT32 brew_reference(unsigned type, unsigned slot)
         brew_free(object);
     }
     return refs;
+}
+
+static UINT32 brew_reference(unsigned type, unsigned slot)
+{
+    return brew_ref(brew_arg(0), type, slot);
+}
+static UINT32 brew_display_font(UINT32 display, UINT32 id)
+{
+    UINT32 at, font;
+    if (id < BREW_FONT_FIRST || id - BREW_FONT_FIRST >= BREW_FONT_COUNT)
+        return 0;
+    at = display + 24 + (id - BREW_FONT_FIRST) * 4;
+    font = brew_u32(at);
+    if (!brew_is_object(font, B_FONT))
+    {
+        font = brew_object(B_FONT);
+        if (font)
+        {
+            brew_w32(font + 4, 0x01001022); /* IFont / default Unicode font. */
+            brew_w32(font + 8, 1);
+            brew_w32(at, font);
+        }
+    }
+    return font;
 }
 
 /* The reserved HLE area is already included in the guest RAM save state. */
@@ -1202,7 +1243,7 @@ static UINT32 brew_shell_method(unsigned slot)
                 : a == 0x01001003                                         ? B_FILEMGR
                 : a == 0x01005000                                         ? B_WEB
                 : a == 0x01001002                                         ? B_HEAP
-                : (a == 0x010211af || a == 0x0101270e || a == 0x01029313) ? B_FONT
+                : (a == 0x010211af || a == 0x0101270e || a == 0x01029313 || a == 0x01001022) ? B_FONT
                 : a == 0x01005509                                         ? B_MEDIA
                 : a == 0x01002001                                         ? B_GRAPHICS
                 : a == 0x01001056                                         ? B_SOUND
@@ -1213,6 +1254,11 @@ static UINT32 brew_shell_method(unsigned slot)
         p = brew_object(i);
         if (!p)
             return BREW_ENOMEMORY;
+        if (i == B_FONT)
+        {
+            brew_w32(p + 4, a);
+            brew_w32(p + 8, a == 0x01001022);
+        }
         if (p && a == 0x01005509)
         {
             for (i = 0; i < 32; i++)
@@ -1367,27 +1413,11 @@ static UINT32 brew_shell_method(unsigned slot)
         return 0;
     }
 }
-static const struct brew_glyph* brew_glyph(UINT16 character)
+/* All three KDDI font classes currently use the public-domain K12 face.
+   Do not invent class-specific handset metrics without reference evidence. */
+static const struct brew_glyph* brew_glyph_code(UINT16 code)
 {
-    UINT32 code = character, lo = 0, hi = sizeof(brew_glyphs) / sizeof(brew_glyphs[0]);
-    if (character > 127)
-    {
-        unsigned a = character & 255, b = character >> 8, row, col;
-        if (a >= 0x81 && a <= 0x9f)
-            row = (a - 0x81) * 2 + 0x21;
-        else if (a >= 0xe0 && a <= 0xef)
-            row = (a - 0xe0) * 2 + 0x5f;
-        else
-            row = 0;
-        if (b >= 0x9f)
-        {
-            row++;
-            col = b - 0x7e;
-        }
-        else
-            col = b - (b >= 0x80 ? 0x20 : 0x1f);
-        code = (row << 8) | col;
-    }
+    UINT32 lo = 0, hi = sizeof(brew_glyphs) / sizeof(brew_glyphs[0]);
     while (lo < hi)
     {
         UINT32 mid = (lo + hi) / 2;
@@ -1397,50 +1427,158 @@ static const struct brew_glyph* brew_glyph(UINT16 character)
             hi = mid;
     }
     return lo < sizeof(brew_glyphs) / sizeof(brew_glyphs[0]) && brew_glyphs[lo].code == code
-        ? &brew_glyphs[lo]
-        : NULL;
+        ? &brew_glyphs[lo] : NULL;
 }
-static UINT32 brew_text_measure(UINT32 text, INT32 count, INT32 max, UINT32* fits)
+static const struct brew_glyph* brew_glyph(UINT32 font, UINT16 character)
 {
-    UINT32 n = 0, width = 0;
-    while ((count < 0 || n < count) && n < 65536)
+    UINT32 code = character;
+    if (font && brew_u32(font + 8))
     {
-        UINT16 ch = brew_u16(text + n * 2);
-        const struct brew_glyph* glyph;
-        unsigned advance;
-        if (!ch)
-            break;
-        glyph = brew_glyph(ch);
-        advance = glyph ? glyph->advance : 12;
-        if (max >= 0 && width + advance > max)
+        UINT32 lo = 0, hi = sizeof(brew_unicode_glyphs) / sizeof(brew_unicode_glyphs[0]);
+        if (character < 128)
+            return brew_glyph_code(character);
+        while (lo < hi)
+        {
+            UINT32 mid = (lo + hi) / 2;
+            if (brew_unicode_glyphs[mid].unicode < character)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if (lo == sizeof(brew_unicode_glyphs) / sizeof(brew_unicode_glyphs[0])
+            || brew_unicode_glyphs[lo].unicode != character)
+            return NULL;
+        code = brew_unicode_glyphs[lo].jis;
+    }
+    else if (character > 127)
+    {
+        unsigned a = character & 255, b = character >> 8, row, col;
+        /* KDDI AECHARs pack Shift JIS in byte order, not Unicode. */
+        if (a >= 0xa1 && a <= 0xdf && !b)
+            return brew_glyph_code(brew_halfwidth_jis[a - 0xa1]);
+        if (a >= 0x81 && a <= 0x9f)
+            row = (a - 0x81) * 2 + 0x21;
+        else if (a >= 0xe0 && a <= 0xef)
+            row = (a - 0xe0) * 2 + 0x5f;
+        else
+            return NULL;
+        if (b < 0x40 || b == 0x7f || b > 0xfc)
+            return NULL;
+        if (b >= 0x9f)
+        {
+            row++;
+            col = b - 0x7e;
+        }
+        else
+            col = b - (b >= 0x80 ? 0x20 : 0x1f);
+        code = (row << 8) | col;
+    }
+    return brew_glyph_code(code);
+}
+/* Decode an OEM byte string into packed Shift JIS characters. Counts in this
+   mode are byte counts; normal IDisplay/IFont counts are AECHAR counts. */
+static unsigned brew_text_next(UINT32 text, unsigned at, unsigned limit, int oem, UINT16* ch)
+{
+    if (at >= limit)
+        return 0;
+    if (!oem)
+    {
+        *ch = brew_u16(text + at * 2);
+        return 1;
+    }
+    *ch = *brew_ptr(text + at, 1);
+    if (((*ch >= 0x81 && *ch <= 0x9f) || (*ch >= 0xe0 && *ch <= 0xfc)) && at + 1 < limit)
+    {
+        unsigned trail = *brew_ptr(text + at + 1, 1);
+        if (trail >= 0x40 && trail <= 0xfc && trail != 0x7f)
+        {
+            *ch |= trail << 8;
+            return 2;
+        }
+    }
+    return 1;
+}
+static int brew_text_limit(UINT32 text, INT32 count, int oem, unsigned* limit)
+{
+    unsigned capacity, n;
+    if (count < -1 || !text || !brew_ptr(text, 1))
+        return 0;
+    capacity = (BREW_RAM_SIZE - text) / (oem ? 1 : 2);
+    if (count >= 0)
+    {
+        if ((UINT32)count > capacity)
+            return 0;
+        *limit = count;
+        return 1;
+    }
+    for (n = 0; n < capacity; n++)
+        if (oem ? !*brew_ptr(text + n, 1) : !brew_u16(text + n * 2))
+        {
+            *limit = n;
+            return 1;
+        }
+    return 0;
+}
+static unsigned brew_text_advance(UINT32 font, UINT16 ch, const struct brew_glyph* glyph)
+{
+    if ((!(font && brew_u32(font + 8)) && ch >= 0xa1 && ch <= 0xdf)
+        || (font && brew_u32(font + 8) && ch >= 0xff61 && ch <= 0xff9f))
+        return 6;
+    return glyph ? glyph->advance : ch < 128 ? 6 : 12;
+}
+static UINT32 brew_text_measure(UINT32 font, UINT32 text, unsigned limit, INT32 max,
+    int oem, UINT32* fits)
+{
+    unsigned n = 0, width = 0, step;
+    UINT16 ch;
+    if (oem)
+        font = 0;
+    while ((step = brew_text_next(text, n, limit, oem, &ch)))
+    {
+        const struct brew_glyph* glyph = brew_glyph(font, ch);
+        unsigned advance = brew_text_advance(font, ch, glyph);
+        if (max >= 0 && width + advance > (UINT32)max)
             break;
         width += advance;
-        n++;
+        n += step;
     }
     if (fits)
         *fits = n;
     return width;
 }
-static void brew_text_draw(
-    UINT32 text, INT32 count, int x, int y, UINT32 color, int left, int top, int right, int bottom)
+static void brew_text_draw(UINT32 font, UINT32 text, unsigned limit, int oem, int x, int y,
+    UINT32 foreground, UINT32 background, int transparent, int left, int top, int right, int bottom)
 {
-    unsigned n = 0;
-    while ((count < 0 || n < count) && n < 65536)
+    unsigned n = 0, step;
+    INT64 cursor = x;
+    UINT16 ch;
+    /* Geometry is computed wide before clipping; negative guest coordinates
+       and very long strings must never overflow framebuffer indexing. */
+    if (oem)
+        font = 0;
+    while ((step = brew_text_next(text, n, limit, oem, &ch)))
     {
-        UINT16 ch = brew_u16(text + n * 2);
-        const struct brew_glyph* glyph;
-        int xx, yy;
-        if (!ch)
+        const struct brew_glyph* glyph = brew_glyph(font, ch);
+        unsigned advance = brew_text_advance(font, ch, glyph);
+        int xx, yy, half = advance == 6 && glyph && glyph->advance == 12;
+        if (cursor >= right)
             break;
-        glyph = brew_glyph(ch);
-        if (glyph)
-            for (yy = 0; yy < 12; yy++)
-                for (xx = 0; xx < 12; xx++)
-                    if ((glyph->rows[yy] & (0x8000 >> xx)) && x + xx >= left && x + xx < right
-                        && y + yy >= top && y + yy < bottom)
-                        brew_framebuffer[(y + yy) * BREW_WIDTH + x + xx] = color;
-        x += glyph ? glyph->advance : 12;
-        n++;
+        for (yy = 0; yy < 12; yy++)
+            for (xx = 0; xx < (int)advance; xx++)
+                if (cursor + xx >= left && cursor + xx < right && (INT64)y + yy >= top
+                    && (INT64)y + yy < bottom)
+                {
+                    /* Halfwidth kana reuse fullwidth glyphs. OR both source
+                       columns so strokes in either half survive the reduction. */
+                    int ink = glyph && (half
+                        ? (glyph->rows[yy] & (0xC000 >> (xx * 2)))
+                        : xx < 12 && (glyph->rows[yy] & (0x8000 >> xx)));
+                    if (ink || !transparent)
+                        brew_framebuffer[((INT64)y + yy) * BREW_WIDTH + cursor + xx]
+                            = ink ? foreground : background;
+                }
+        cursor += advance;
+        n += step;
     }
 }
 
@@ -1457,20 +1595,36 @@ static UINT32 brew_display_method(unsigned slot)
     case 1:
         return 1;
     case 2:
-        brew_w32(b, 10);
-        brew_w32(c, 2);
+        if (!brew_display_font(object, a) || (b && !brew_ptr(b, 4)) || (c && !brew_ptr(c, 4)))
+            return BREW_EFAILED;
+        if (b)
+            brew_w32(b, 10);
+        if (c)
+            brew_w32(c, 2);
         return 12;
     case 3:
-        n = brew_text_measure(b, (INT32)c, (INT32)brew_arg(4), &i);
-        brew_w32(brew_arg(5), i);
+    {
+        unsigned limit;
+        UINT32 font = brew_display_font(object, a), output = brew_arg(5);
+        if (!font || !brew_text_limit(b, (INT32)c, 0, &limit) || (INT32)brew_arg(4) < -1
+            || (output && !brew_ptr(output, 4)))
+            return 0;
+        n = brew_text_measure(font, b, limit, (INT32)brew_arg(4), 0, &i);
+        if (output)
+            brew_w32(output, i);
         return n;
+    }
     case 4:
     {
         UINT32 rect = brew_arg(6), flags = brew_arg(7);
         int x = (INT32)brew_arg(4), y = (INT32)brew_arg(5), left = 0, top = 0, right = BREW_WIDTH,
             bottom = BREW_HEIGHT;
-        int width = brew_text_measure(b, (INT32)c, -1, NULL), xx, yy;
-        UINT32 foreground = brew_colors[1], background = brew_colors[2];
+        UINT32 font = brew_display_font(object, a), foreground = brew_colors[1], background = brew_colors[2];
+        unsigned limit;
+        int oem = !!(flags & 0x10000), width, xx, yy;
+        if (!font || !brew_text_limit(b, (INT32)c, oem, &limit) || (rect && !brew_ptr(rect, 8)))
+            return BREW_EBADPARM;
+        width = brew_text_measure(font, b, limit, -1, oem, NULL);
         if (rect)
         {
             left = (INT16)brew_u16(rect);
@@ -1503,19 +1657,28 @@ static UINT32 brew_display_method(unsigned slot)
             foreground = brew_colors[2];
             background = brew_colors[1];
         }
-        if (flags & 2)
+        if (flags & 7)
             for (yy = top; yy < bottom; yy++)
                 for (xx = left; xx < right; xx++)
-                    brew_framebuffer[yy * BREW_WIDTH + xx] = background;
-        if (!(flags & 0x8000))
-            for (yy = y; yy < y + 12; yy++)
-                for (xx = x; xx < x + width; xx++)
-                    if (xx >= left && xx < right && yy >= top && yy < bottom)
-                        brew_framebuffer[yy * BREW_WIDTH + xx] = background;
-        brew_text_draw(b, (INT32)c, x, y, foreground, left, top, right, bottom);
-        if ((flags & 0x2000) && y + 11 >= top && y + 11 < bottom)
-            for (xx = x < left ? left : x; xx < x + width && xx < right; xx++)
-                brew_framebuffer[(y + 11) * BREW_WIDTH + xx] = foreground;
+                {
+                    UINT32* pixel = &brew_framebuffer[yy * BREW_WIDTH + xx];
+                    int rx = rect ? (INT16)brew_u16(rect) : 0;
+                    int ry = rect ? (INT16)brew_u16(rect + 2) : 0;
+                    int rw = rect ? (INT16)brew_u16(rect + 4) : BREW_WIDTH;
+                    int rh = rect ? (INT16)brew_u16(rect + 6) : BREW_HEIGHT;
+                    if (flags & 4)
+                        *pixel ^= 0xffffff;
+                    else if ((flags & 1) && (xx == rx || yy == ry || xx == rx + rw - 1 || yy == ry + rh - 1))
+                        *pixel = brew_colors[3];
+                    else if (flags & 2)
+                        *pixel = background;
+                }
+        brew_text_draw(font, b, limit, oem, x, y, foreground, background, flags & 0x8000,
+            left, top, right, bottom);
+        if ((flags & (0x2000 | 0x20000)) && (INT64)y + 11 >= top && (INT64)y + 11 < bottom)
+            for (xx = x < left ? left : x; (INT64)xx < (INT64)x + width && xx < right; xx++)
+                if (!(flags & 0x20000) || !(((INT64)xx - x) & 1))
+                    brew_framebuffer[((INT64)y + 11) * BREW_WIDTH + xx] = foreground;
         return 0;
     }
     case 5:
@@ -1549,8 +1712,22 @@ static UINT32 brew_display_method(unsigned slot)
             return old << 8;
         }
         return 0;
+    case 15:
+        return brew_object(B_BITMAP); /* The physical framebuffer. */
+    case 16:
+        if (!a || !brew_ptr(a, 4))
+            return BREW_EBADPARM;
+        i = brew_object(B_BITMAP);
+        brew_w32(a, i);
+        return i ? 0 : BREW_ENOMEMORY;
     case 17:
-        return 0;
+        if (!brew_is_object(b, B_FONT))
+            return 0;
+        i = brew_display_font(object, a);
+        if (!i)
+            return 0;
+        brew_w32(object + 24 + (a - BREW_FONT_FIRST) * 4, b);
+        return i;
     case 18:
     {
         int left = a ? (INT16)brew_u16(a) : 0, top = a ? (INT16)brew_u16(a + 2) : 0;
@@ -1592,6 +1769,8 @@ static UINT32 brew_display_method(unsigned slot)
         if (!clone)
             return BREW_ENOMEMORY;
         memcpy(brew_ptr(clone + 4, 56), brew_ptr(object + 4, 56), 56);
+        for (i = 0; i < BREW_FONT_COUNT; i++)
+            brew_ref(brew_u32(clone + 24 + i * 4), B_FONT, 0);
         return 0;
     }
     case 22:
@@ -1602,14 +1781,100 @@ static UINT32 brew_display_method(unsigned slot)
 }
 static UINT32 brew_font_method(unsigned slot)
 {
-    if (slot == 5)
+    UINT32 object = brew_arg(0), a = brew_arg(1), b = brew_arg(2), c = brew_arg(3);
+    if (slot == 2)
     {
-        UINT32 p = brew_arg(1);
-        brew_w32(p, 10);
-        brew_w32(p + 4, 2);
+        if (!b || !brew_ptr(b, 4))
+            return BREW_EBADPARM;
+        brew_w32(b, 0);
+        if (a != 0x01000001 && a != 0x01001022)
+            return BREW_ECLASSNOTSUPPORT;
+        brew_ref(object, B_FONT, 0);
+        brew_w32(b, object);
         return 0;
     }
-    return slot < 2 ? 1 : 0;
+    if (slot == 3)
+    {
+        UINT32 text = brew_arg(4), count = brew_arg(5), rect = brew_arg(8), flags = brew_arg(9);
+        unsigned limit;
+        int left = 0, top = 0, right = BREW_WIDTH, bottom = BREW_HEIGHT;
+        /* Direct IFont is strict: nChars is explicit, and pDst must be an
+           actual bitmap. It uses the bitmap bounds, not a display's clip. */
+        if (!brew_is_object(a, B_BITMAP))
+            return BREW_EUNSUPPORTED;
+        if ((INT32)count < 0 || !brew_text_limit(text, count, 0, &limit)
+            || !rect || !brew_ptr(rect, 8))
+            return BREW_EBADPARM;
+        left = (INT16)brew_u16(rect);
+        top = (INT16)brew_u16(rect + 2);
+        right = left + (INT16)brew_u16(rect + 4);
+        bottom = top + (INT16)brew_u16(rect + 6);
+        if (left < 0) left = 0;
+        if (top < 0) top = 0;
+        if (right > BREW_WIDTH) right = BREW_WIDTH;
+        if (bottom > BREW_HEIGHT) bottom = BREW_HEIGHT;
+        brew_text_draw(object, text, limit, 0, (INT32)b, (INT32)c,
+            brew_arg(6) & 0xffffff, brew_arg(7) & 0xffffff, flags & 0x8000,
+            left, top, right, bottom);
+        return 0;
+    }
+    if (slot == 4)
+    {
+        UINT32 fits = brew_arg(4), pixels = brew_arg(5), n, width;
+        unsigned limit;
+        if ((INT32)b < 0 || (INT32)c < 0 || !fits || !pixels
+            || !brew_ptr(fits, 4) || !brew_ptr(pixels, 4)
+            || !brew_text_limit(a, b, 0, &limit))
+            return BREW_EBADPARM;
+        width = brew_text_measure(object, a, limit, c, 0, &n);
+        brew_w32(fits, n);
+        brew_w32(pixels, width);
+        return 0;
+    }
+    if (slot == 5)
+    {
+        UINT8 info[4] = { 10, 0, 2, 0 };
+        if ((INT32)b < 0 || b > sizeof(info))
+            return BREW_EUNSUPPORTED;
+        if (!a || !brew_ptr(a, b))
+            return BREW_EBADPARM;
+        memcpy(brew_ptr(a, b), info, b);
+        return 0;
+    }
+    return BREW_EUNSUPPORTED;
+}
+/* Minimal physical-bitmap interface for direct IFont clients. Offscreen
+   bitmap allocation and unrelated blitters remain outside the font API. */
+static UINT32 brew_bitmap_method(unsigned slot)
+{
+    UINT32 object = brew_arg(0), a = brew_arg(1), b = brew_arg(2);
+    if (slot == 2)
+    {
+        if (!b || !brew_ptr(b, 4))
+            return BREW_EBADPARM;
+        brew_w32(b, 0);
+        if (a != 0x01000001 && a != 0x01001021)
+            return BREW_ECLASSNOTSUPPORT;
+        brew_ref(object, B_BITMAP, 0);
+        brew_w32(b, object);
+        return 0;
+    }
+    if (slot == 3)
+        return a >> 8;
+    if (slot == 4)
+        return a << 8;
+    if (slot == 12)
+    {
+        if (b != 12)
+            return BREW_EUNSUPPORTED;
+        if (!a || !brew_ptr(a, 12))
+            return BREW_EBADPARM;
+        brew_w32(a, BREW_WIDTH);
+        brew_w32(a + 4, BREW_HEIGHT);
+        brew_w32(a + 8, 24);
+        return 0;
+    }
+    return BREW_EUNSUPPORTED;
 }
 static void brew_line(int x0, int y0, int x1, int y1, UINT32 color)
 {
@@ -1751,6 +2016,8 @@ static READ32_HANDLER(brew_trap_r)
         result = brew_file_method(slot);
     else if (type == B_FONT)
         result = brew_font_method(slot);
+    else if (type == B_BITMAP)
+        result = brew_bitmap_method(slot);
     else if (type == B_MEDIA)
         result = brew_media_method(slot);
     else if (type == B_GRAPHICS)
