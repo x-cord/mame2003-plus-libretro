@@ -103,7 +103,8 @@ static VIDEO_UPDATE(xavixtv) {
    }
  }
 }
-static DRIVER_INIT(ekara) {xavix_super=0;}
+static DRIVER_INIT(ekara) {xavix_super=0;xavix_tv_set_cart_eeprom(0);}
+static DRIVER_INIT(ekara_eeprom) {xavix_super=0;xavix_tv_set_cart_eeprom(1);}
 static DRIVER_INIT(stvpc) {
  xavix_super=1;
  /* Same EEPROM-error bypass as upstream super_tv_pc_cart.xml. */
