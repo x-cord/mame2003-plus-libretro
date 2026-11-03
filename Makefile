@@ -11,6 +11,8 @@ CPU_ARCH      ?= 0 # as of November 2018 this flag doesn't seem to be used but i
 
 LIBS          ?=
 
+EMULATORJS_THREADS ?= 0
+
 HIDE ?= @
 
 ifneq ($(SANITIZER),)
@@ -550,6 +552,12 @@ else ifeq ($(platform), emscripten)
 	HAVE_RZLIB := 1
 	STATIC_LINKING := 1
 	PLATCFLAGS += -D__EMSCRIPTEN__
+
+	ifeq ($(EMULATORJS_THREADS), 1)
+		LDFLAGS += -pthread
+		CFLAGS += -pthread
+		CXXFLAGS += -pthread
+	endif
 
 # Windows MSVC 2003 Xbox 1
 else ifeq ($(platform), xbox1_msvc2003)
