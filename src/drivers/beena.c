@@ -17,6 +17,9 @@
 #include "cpu/arm7be/arm7be.h"
 
 #include <time.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 #define ROM_MASK_BASE  0x80000000
 #define ROM_FLASH_BASE 0xa0000000
@@ -101,6 +104,41 @@ static void beena_update_pen_target(void)
 	beena_pen_keys = key;
 }
 
+
+#ifdef __EMSCRIPTEN__
+static int beena_has_book(void)
+{
+	return Machine && Machine->gamedrv && !strncmp(Machine->gamedrv->name, "beena", 5);
+}
+
+/* Layout state: page[3:0], target[4], contact[5], X[15:8], Y[23:16], count[27:24]. */
+EMSCRIPTEN_KEEPALIVE int beena_get_book_state(void)
+{
+	int x, y, contact;
+	if (!beena_has_book()) return -1;
+	beena_update_pen_target();
+	x = beena_book_x >= 0 ? beena_book_x : (readinputport(6) & 0xff);
+	y = beena_book_y >= 0 ? beena_book_y : (readinputport(7) & 0xff);
+	contact = beena_book_contact || (readinputport(4) & 1);
+	return beena_selected_page | (beena_pen_target << 4) | (contact << 5) | (x << 8) | (y << 16) | (beena_book_positions() << 24);
+}
+
+EMSCRIPTEN_KEEPALIVE void beena_set_book_page(int page)
+{
+	if (beena_has_book() && page >= 0 && page < beena_book_positions()) beena_selected_page = page;
+}
+
+/* Negative coordinates return pen movement to the normal input ports. */
+EMSCRIPTEN_KEEPALIVE void beena_set_book_pen(int x, int y, int contact, int target)
+{
+	if (!beena_has_book()) return;
+	beena_update_pen_target();
+	beena_book_x = x >= 0 ? (x > 255 ? 255 : x) : -1;
+	beena_book_y = y >= 0 ? (y > 255 ? 255 : y) : -1;
+	beena_book_contact = contact != 0;
+	if (target == 0 || target == 1) beena_pen_target = target;
+}
+#endif
 
 static void beena_release_book_pen(void)
 {
