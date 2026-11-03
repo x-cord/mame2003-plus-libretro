@@ -29,8 +29,10 @@ struct EkaraI2C {
  int page_offset=0;
  int page_written=0;
 
+ EkaraI2C() { memset(data,0xff,sizeof(data)); }
+
+ // Reset the serial bus without erasing the cartridge EEPROM.
  void reset() {
-  memset(data,0xff,sizeof(data));
   memset(page,0xff,sizeof(page));
   scl=0; sdaw=1; sdar=1;
   state=IDLE; bits=0; shift=0; devsel=0;
@@ -154,6 +156,10 @@ static bool xavix_cart_has_eeprom = false;
 extern "C" void xavix_tv_set_cart_eeprom(int enable) { xavix_cart_has_eeprom = (enable != 0); }
 extern "C" unsigned char *ekara_eeprom_data(void) { return ekara_i2c.data; }
 static EkaraI2C stvpc_i2c;
+static bool xavix_save_super = false;
+extern "C" unsigned char *xavix_save_eeprom_data(void) {
+ return xavix_cart_has_eeprom ? (xavix_save_super ? stvpc_i2c.data : ekara_i2c.data) : nullptr;
+}
 extern "C" unsigned char *stvpc_eeprom_data(void) { return stvpc_i2c.data; }
 static double (*xavix_emulated_clock)(void)=nullptr;
 extern "C" void xavix_tv_set_clock(double (*clock)(void)) { xavix_emulated_clock=clock; }
@@ -479,8 +485,6 @@ static uint8_t ext_read(uint32_t a) {
   return tv.bios[a];
  }
  if(xavix_cart_has_eeprom && a==0x5fffff && (tv.m_extbusctrl[1]&8))return ekara_i2c.read_sda() ? 255 : 0;
- // GK-1's unpopulated peripheral bus leaves the serial data line high.
- if(ekara_effect_profile==3 && a==0x5fffff && (tv.m_extbusctrl[1]&8))return 255;
  if(a<0x600000)return tv.cart[a&0x1fffff];
  return tv.bios[(a-0x600000)&0xfffff];
 }
@@ -509,6 +513,7 @@ static uint8_t xavix_sound_sample_read(unsigned a) {return tv.read_full_data_sp_
 
 #include <new>
 extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart) {
+ xavix_save_super = super != 0;
  stvpc_printer.reset();
  stvpc_keyboard.reset();
  cursor_input=CursorInput{};

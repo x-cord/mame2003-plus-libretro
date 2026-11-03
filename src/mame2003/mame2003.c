@@ -19,6 +19,7 @@
 
 #include "mame.h"
 #include "driver.h"
+#include "drivers/xavix_port.h"
 #include "state.h"
 #include "log.h"
 #include "input.h"
@@ -706,8 +707,23 @@ void osd_stop_audio_stream(void)
 ******************************************************************************/
 
 unsigned retro_get_region (void) {return RETRO_REGION_NTSC;}
-void *retro_get_memory_data(unsigned type) {return 0;}
-size_t retro_get_memory_size(unsigned type) {return 0;}
+/* XaviX cartridge EEPROM is native save memory, independent of save states. */
+void *retro_get_memory_data(unsigned type)
+{
+  if (type != RETRO_MEMORY_SAVE_RAM)
+    return NULL;
+  /* RetroArch loads SRAM before the first machine reset. Select the TV-PC
+   * device from the driver, before the hardware port sets its runtime mode. */
+  if (game_driver && !strcmp(game_driver->name, "stvpc_conan"))
+    return stvpc_eeprom_data();
+  if (game_driver && !strcmp(game_driver->name, "ekara_gk1"))
+    return ekara_eeprom_data();
+  return xavix_save_eeprom_data();
+}
+size_t retro_get_memory_size(unsigned type)
+{
+  return retro_get_memory_data(type) ? 1024 : 0;
+}
 bool retro_load_game_special(unsigned game_type, const struct retro_game_info *info, size_t num_info){return false;}
 void retro_cheat_reset(void){}
 void retro_cheat_set(unsigned unused, bool unused1, const char* unused2){}
