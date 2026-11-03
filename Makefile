@@ -908,7 +908,7 @@ CFLAGS += $(INCFLAGS) $(INCFLAGS_PLATFORM)
 # combine the various definitions to one
 CDEFS = $(DEFS) $(CPUDEFS) $(SOUNDDEFS) $(ASMDEFS) $(DBGDEFS)
 
-OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_ASM:.s=.o) $(SOURCES_ASM_PP:.S=.o)
+OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_CXX:.cpp=.o) $(SOURCES_ASM:.s=.o) $(SOURCES_ASM_PP:.S=.o)
 
 OBJOUT   = -o
 LINKOUT  = -o 
@@ -955,6 +955,10 @@ endif
 
 CFLAGS += $(PLATCFLAGS) $(CDEFS)
 
+%.o: %.cpp
+	@echo Compiling $<...
+	$(HIDE)$(CXX) -std=c++17 -fno-exceptions -fno-rtti -c $(OBJOUT)$@ $< $(filter-out -std=gnu99 -std=gnu89 -Wstrict-prototypes -Werror=implicit-function-declaration,$(CFLAGS))
+
 %.o: %.c
 	@echo Compiling $<...
 	$(HIDE)$(CC) -c $(OBJOUT)$@ $< $(CFLAGS)
@@ -976,6 +980,12 @@ ifeq ($(SPLIT_UP_LINK), 1)
 	@rm $@.in
 endif
 	$(HIDE)rm -f $(OBJECTS) $(TARGET)
+
+# The portable XaviX port includes the generated CPU/hardware algorithms.
+ifeq ($(DEBUG),0)
+src/drivers/xavix_port.o src/drivers/xavixtv.o: CFLAGS += -O3
+endif
+src/drivers/xavix_port.o: $(wildcard src/cpu/xavix/*.inc src/cpu/xavix/*.h src/cpu/xavix_engine.inc src/drivers/xavix_*.inc src/drivers/xavix_port.h src/drivers/stvpc_*.h src/sound/xavix_port.*)
 # 1. Map object files to dependency trackers
 DEPFILES := $(OBJECTS:.o=.d)
 

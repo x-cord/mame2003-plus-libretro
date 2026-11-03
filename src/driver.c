@@ -3319,6 +3319,10 @@ DokiDoki Penguin Land *not confirmed
 	DRIVER( beena )	/* Sega Toys Advanced Pico Beena */
 	DRIVER( beena_conan )
 	DRIVER( brew_conan )
+	DRIVER( ekara_gk1 )
+	DRIVER( ekara_sc7 )
+	DRIVER( ekara_sc15 )
+	DRIVER( stvpc_conan )
 	DRIVER( spcpostn )	/* (c) 1986 Sega / Nasco" */
 	DRIVER( angelkds )	/* 833-6599 (c) 1988 Sega / Nasco? */
 	DRIVER( calorie )   /* (c) 1986 Sega */
