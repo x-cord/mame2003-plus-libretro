@@ -50,7 +50,7 @@ void xavix_sound_device::device_reset()
 		m_voice[v].env_vol_left = 0x00;
 		m_voice[v].env_vol_right = 0x00;
 
-		m_voice[v].env_period_samples = envelope_period_ticks(m_tempo_div[v & 3]);
+		m_voice[v].env_period_samples = voice_envelope_period(v);
 		m_voice[v].env_countdown = m_voice[v].env_period_samples;
 		m_voice[v].env_active_left = 1;
 		m_voice[v].env_active_right = 1;
@@ -259,7 +259,7 @@ void xavix_sound_device::enable_voice(int voice, bool update_only)
 
 	// Envelope tempo
 	const uint8_t tp = m_tempo_div[voice & 3];
-	m_voice[voice].env_period_samples = tp ? envelope_period_ticks(tp) : 0;
+	m_voice[voice].env_period_samples = voice_envelope_period(voice);
 	m_voice[voice].env_countdown = m_voice[voice].env_period_samples; // 0 means envelope paused
 	m_voice[voice].env_active_left = 1;
 	m_voice[voice].env_active_right = 1;
@@ -417,6 +417,11 @@ uint32_t xavix_sound_device::envelope_period_ticks(uint8_t tp) const
 	const uint64_t scaled = uint64_t(base) * 16u;      // envelope cadence
 	return uint32_t(scaled > 64'000'000u ? 64'000'000u : scaled);
 }
+uint32_t xavix_sound_device::voice_envelope_period(int voice) const
+{
+	uint32_t period = envelope_period_ticks(m_tempo_div[voice & 3]);
+	return period;
+}
 attotime xavix_sound_device::tempo_period(uint8_t tempo) const
 {
 	const uint32_t samples = tempo_to_period_ticks(tempo);
@@ -452,7 +457,7 @@ void xavix_sound_device::set_tempo(int index, uint8_t value)
 
 		xavix_voice& vv = m_voice[v];
 
-		const uint32_t newp = (value == 0) ? 0u : envelope_period_ticks(value);
+		const uint32_t newp = voice_envelope_period(v);
 
 		vv.env_period_samples = newp;
 
@@ -479,7 +484,7 @@ void xavix_sound_device::set_cyclerate(uint8_t value)
 		const uint8_t tp = m_tempo_div[v & 3];
 
 		const uint32_t oldp_raw = vv.env_period_samples; // may be 0
-		const uint32_t newp = (tp == 0) ? 0 : envelope_period_ticks(tp);
+		const uint32_t newp = voice_envelope_period(v);
 
 		if (oldp_raw && newp)
 			vv.env_countdown = (uint64_t)vv.env_countdown * newp / oldp_raw; // scale to next tick
@@ -526,14 +531,14 @@ void xavix_sound_device::step_envelope(int voice)
 	{
 		const uint8_t group = voice & 3;
 		const uint8_t tp = m_tempo_div[group];
-		const uint32_t period = (tp == 0) ? 0u : envelope_period_ticks(tp);
+		const uint32_t period = voice_envelope_period(voice);
  (void)0;
 
 		logged_start = true;
 		logged_stop = false;
 	}
 
-	const uint32_t target_period = envelope_period_ticks(m_tempo_div[voice & 3]);
+	const uint32_t target_period = voice_envelope_period(voice);
 
 	// Smooth re-tune to new period
 	if (v.env_period_samples != target_period)

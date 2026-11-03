@@ -362,8 +362,22 @@ struct XavixTV {
  uint8_t sound_tp3_r(){return m_tp[3];}
  void raise_nmi() {cpu.m_nmi_pending=true;cpu.pending_irq=true;}
  uint8_t random_byte() {random_state^=random_state<<13;random_state^=random_state>>17;random_state^=random_state<<5;return random_state;}
- void timer_start() {xavix_host_timer(1,double(1u<<((m_timer_freq&15)+1))/(super?42954544:21477272),0);}
- void timer_control_w(uint8_t d) {m_timer_control=d;if(d&128){m_irqsource&=~16;update_irqs();}if(d&1){m_timer_currentval=m_timer_baseval;timer_start();}else xavix_host_timer(1,1e30,0);}
+ // A reload cycle takes one prescaler tick in addition to the countdown.
+ void timer_start(unsigned clocks=1) {
+  xavix_host_timer(1,clocks*double(1u<<((m_timer_freq&15)+1))/(super?42954544:21477272),0);
+ }
+ void timer_control_w(uint8_t data) {
+  const uint8_t previous=m_timer_control;
+  m_timer_control=data;
+  if(data&0x80) {m_irqsource&=~0x10;update_irqs();}
+  if(!(data&1)) {xavix_host_timer(1,1e30,0);return;}
+  // Bit 1 keeps the counter running through IRQ acknowledgement. Restarting
+  // here adds the firmware's interrupt latency to every sampling period.
+  if((previous&3)!=3 || !(data&2)) {
+   m_timer_currentval=m_timer_baseval;
+   timer_start();
+  }
+ }
  void refresh_sound_irq_state() {if((m_sound_irqstatus&15)&(m_sound_irqstatus>>4))m_irqsource|=128;else m_irqsource&=~128;}
  void reprogram_sound_timer(int i) {double hz=sound.tempo_tick_hz(m_tp[i]);if(!(m_sound_irqstatus&(1<<i))||!m_tp[i]||hz<=0)xavix_host_timer(2+i,1e30,0);else xavix_host_timer(2+i,1/hz,1/hz);}
 };
@@ -576,8 +590,15 @@ extern "C" void xavix_tv_timer(int id) {
   tv.m_interrupt_timer->adjust(tv.m_screen->time_until_pos(tv.m_posirq_y[0],tv.m_posirq_x[0]));
  } else if(id==1) {
   tv.m_timer_currentval--;
-  if(tv.m_timer_currentval==255){if(tv.m_timer_control&64){tv.m_irqsource|=16;tv.m_timer_control|=128;tv.update_irqs();}}
-  else tv.timer_start();
+  if(tv.m_timer_currentval==255) {
+   if(tv.m_timer_control&0x40) {
+    tv.m_irqsource|=0x10;tv.m_timer_control|=0x80;tv.update_irqs();
+   }
+   if(tv.m_timer_control&2) {
+    tv.m_timer_currentval=tv.m_timer_baseval;
+    tv.timer_start(2);
+   }
+  } else tv.timer_start();
  } else {
   if(tv.m_sound_irqstatus&(1<<(id-2))){tv.m_sound_irqstatus|=16<<(id-2);tv.refresh_sound_irq_state();tv.update_irqs();}
  }

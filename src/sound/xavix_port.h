@@ -34,6 +34,7 @@ public:
 	double tempo_tick_hz(uint8_t tempo) const;
 	uint32_t  phase_step_per_tick(uint32_t rate) const;
 	uint32_t envelope_period_ticks(uint8_t tp) const;
+	uint32_t voice_envelope_period(int voice) const;
 
 	void set_default_tempo(uint8_t tempo) { m_tempo_reset_value = tempo; }
 
