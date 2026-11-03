@@ -7,6 +7,9 @@
 #include "state.h"
 #include "cpu/xavix/xavix.h"
 #include "xavix_port.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 
 static mame_timer *xavix_timers[7];
 static int xavix_stream = -1;
@@ -305,3 +308,24 @@ GAMEX(2004,ekara_gk1,0,ekara,ekara,ekara_eeprom,ROT0,"Takara","GK-1 - Detective 
 GAMEX(2001,ekara_sc7,0,ekara,ekara,ekara,ROT0,"Takara","Saiten Cartridge - Detective Conan Vol. 1 (e-kara)",GAME_IMPERFECT_SOUND)
 GAMEX(2002,ekara_sc15,0,ekara,ekara,ekara,ROT0,"Takara","Saiten Cartridge - Detective Conan Vol. 2 (e-kara)",GAME_IMPERFECT_SOUND)
 GAMEX(2005,stvpc_conan,0,stvpc,stvpc,stvpc,ROT0,"Epoch","Detective Conan - Suiri Adventure (Super TV-PC)",GAME_IMPERFECT_GRAPHICS|GAME_IMPERFECT_SOUND)
+
+#ifdef __EMSCRIPTEN__
+/* The firmware retains a zero-based selected song index in RAM during playback. */
+EMSCRIPTEN_KEEPALIVE int ekara_lcd_state(void) {
+ const char *name = ekara_driver_name();
+ unsigned char *ram = xavix_tv_ram();
+ unsigned index;
+ if (!ram) return 0;
+ if (!strcmp(name, "ekara_gk1")) {
+  if (ram[0x1648] != 4) return 0;
+  index = ram[0x166f];
+ } else if (!strcmp(name, "ekara_sc7")) {
+  if (ram[0x16b2] != 4 || ram[0x1658] != 6 || ram[0x165b] != 2) return 0;
+  index = ram[0x16d4];
+ } else if (!strcmp(name, "ekara_sc15")) {
+  if (ram[0x172a] != 4 || ram[0x1678] != 6 || ram[0x167b] != 2) return 0;
+  index = ram[0x174c];
+ } else return 0;
+ return index < 99 ? index + 1 : 0;
+}
+#endif

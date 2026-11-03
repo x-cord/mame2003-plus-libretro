@@ -10,6 +10,9 @@
 #include <iterator>
 #include <type_traits>
 #include <stddef.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
 #include "xavix_port.h"
 #include "ekara_microphone.h"
 static EkaraMicrophone ekara_microphone;
@@ -942,3 +945,19 @@ extern "C" void xavix_tv_register_state(void) {
  SAVE(sound.m_tempo_reset_value);
 #undef SAVE
 }
+
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void *ekara_microphone_buffer() { return &ekara_microphone.buffer; }
+extern "C" EMSCRIPTEN_KEEPALIVE int stvpc_printer_height(void) { return stvpc_printer.height; }
+extern "C" EMSCRIPTEN_KEEPALIVE int stvpc_printer_rows(void) { return stvpc_printer.rows; }
+extern "C" EMSCRIPTEN_KEEPALIVE const unsigned char *stvpc_printer_pixels(void) { return stvpc_printer.pixels; }
+extern "C" EMSCRIPTEN_KEEPALIVE void *ekara_effect_state() {
+ if(ekara_effect_profile==3) return &ekara_effect_hardware.echo;
+ if(!ekara_effect_song()) return nullptr;
+ unsigned address=ekara_effect_profile==1 ? 0x16d5 : 0x174d;
+ ekara_effect_report[0]=tv.ram[address];
+ ekara_effect_report[1]=tv.ram[address+1];
+ ekara_effect_report[2]=(tv.ram[0x41]&1)!=0;
+ return ekara_effect_report;
+}
+#endif
