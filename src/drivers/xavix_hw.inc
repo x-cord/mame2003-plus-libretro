@@ -218,6 +218,8 @@ void XavixTV::superxavix_plt_loc_w(offs_t offset, uint8_t data)
 	m_sx_plt_loc[offset] = data;
 	if (offset == 3)
 	{
+		// Commit the old partial byte before latching a new destination.
+		if (m_plotter_has_byte) superxavix_plt_flush_w(m_sx_plt_mode);
 		m_sx_plt_address = (m_sx_plt_loc[3] << 24) | (m_sx_plt_loc[2] << 16) | (m_sx_plt_loc[1] << 8) | (m_sx_plt_loc[0] << 0);
  (void)0;
 	}
@@ -1213,27 +1215,17 @@ void XavixTV::draw_tile_line(screen_device &screen, bitmap_rgb32 &bitmap, const 
 
 		col = col * m_video_hres_multiplier;
 
-		if (cliprect.containsx(col))
+		// High-resolution bitmap pixels have independent priorities beneath doubled tiles.
+		for (int pixel = col; pixel < col + m_video_hres_multiplier; pixel++)
 		{
+			if (!cliprect.containsx(pixel)) continue;
 			uint16_t *const zyposptr = &m_zbuffer.pix(ypos);
-
-			if (zval >= zyposptr[col])
+			if (zval < zyposptr[pixel]) continue;
+			int pen = (dat + (pal << 4)) & 0xff;
+			if ((m_palram_sh[pen] & 0x1f) < 24)
 			{
-				int pen = (dat + (pal << 4)) & 0xff;
-
-				if ((m_palram_sh[pen] & 0x1f) < 24) // hue values 24-31 are transparent
-				{
-					uint32_t *const yposptr = &bitmap.pix(ypos);
-					yposptr[col] = paldata[pen];
-					if (m_video_hres_multiplier == 2)
-						yposptr[col+1] = paldata[pen];
-
-					zyposptr[col] = zval;
-
-					if (m_video_hres_multiplier == 2)
-						zyposptr[col+1] = zval;
-
-				}
+				bitmap.pix(ypos, pixel) = paldata[pen];
+				zyposptr[pixel] = zval;
 			}
 		}
 	}
@@ -1352,6 +1344,16 @@ void XavixTV::draw_bitmap_layer(screen_device &screen, bitmap_rgb32 &bitmap, con
 			int base2 = topadr * 0x8;
 
 			int bpp = ((mode & 0x0e) >> 1) + 1;
+
+			// Both stored fields are woven into each progressive output frame.
+			int rowbytes = ((rgt - lft) * bpp + 7) / 8;
+			if (super && rowbytes > 0 && step * 8 == rowbytes * 2)
+			{
+				if (base2 % (rowbytes * 2) == rowbytes) base2 -= rowbytes;
+				// The bitmap origin falls between fields: output row zero starts
+				// at stored row one, then continues into the next row pair.
+				base2 += (xavix_output_field + 1) * rowbytes;
+			}
 			int zval = ((mode & 0xf0) >> 4);
 
 			int hposadjust, vpostadjust;
@@ -1369,7 +1371,7 @@ void XavixTV::draw_bitmap_layer(screen_device &screen, bitmap_rgb32 &bitmap, con
 			else
 				hposadjust = 0x46; // good for udance, ban_ordj, not quite correct for ban_kksj in demo
 
-			vpostadjust = 0x06; // probably can vary (see XaviX boot-up logos, logo vs text positions)
+			vpostadjust = super ? 0x05 : 0x06; // Super TV-PC bitmap text aligns with its tilemap windows.
 
 			top += vpostadjust;
 			bot += vpostadjust;

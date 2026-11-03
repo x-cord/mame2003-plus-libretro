@@ -10,6 +10,7 @@ void xavix_tv_write(unsigned address, unsigned char data);
 void xavix_tv_vblank(void);
 void xavix_tv_timer(int id);
 void xavix_tv_render(unsigned int *pixels, int first, int last);
+void xavix_tv_render_progressive(unsigned int *pixels, int first, int last);
 void xavix_tv_audio(short **outputs, int samples);
 void xavix_tv_register_state(void);
 double xavix_raster_delay(int y, int x);

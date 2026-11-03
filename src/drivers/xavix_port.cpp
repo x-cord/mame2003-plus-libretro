@@ -67,6 +67,7 @@ struct Palette {
  unsigned black_pen() const {return 0;}
  void set_pen_color(int i,int r,int g,int b) {colors[i]=(r<<16)|(g<<8)|b;}
 };
+static int xavix_output_field = 0;
 struct XavixTV {
  #include "xavix_members.inc"
  #include "xavix_decls.inc"
@@ -82,7 +83,26 @@ struct XavixTV {
   if(a<0x400) {uint8_t v=a;return ((a&0x200)?((~v>>4)&15):(v>>4))|((a&0x100)?(~v<<4):(v<<4));}
   return m_txarray[(a-0x400)/0x400];
  }
- uint8_t read_io0(uint8_t) {return super?0:xavix_host_input(0);}
+ uint8_t mouse_read(int axis) {
+  if(!mouse_latched[axis]) {
+   int x,y;
+   mouse_delta[axis]=0;
+   if(xavix_host_pointer(&x,&y)) {
+    int target=axis?std::clamp(y,24,232):std::clamp(x,8,248);
+    // Conan's firmware mouse coordinates also reflect menu warps and restores.
+    unsigned address=0x2bf7+axis*2;
+    int current=ram[address]|(ram[address+1]<<8);
+    if(current>=0 && current<=255)
+     mouse_delta[axis]=std::clamp(target-current,-127,127);
+   }
+   mouse_latched[axis]=true;
+  }
+  return uint8_t(mouse_delta[axis]);
+ }
+ void mouse_clear(int axis) {
+  mouse_delta[axis]=0;mouse_latched[axis]=false;
+ }
+ uint8_t read_io0(uint8_t) {return xavix_host_input(0);}
  uint8_t read_io1(uint8_t) {
   if(super)return xavix_host_input(1);
   int index=0;uint8_t sel=extraioselect&0x7f;
@@ -117,9 +137,8 @@ static XavixTV tv;
 static uint8_t low_read(uint16_t a) {
  if(a<0x4000)return tv.ram[a];
  #include "xavix_read.inc"
- if(a==0x7b00)return tv.super?uint8_t((xavix_host_input(4)^0x7f)+1):255;
- if(a==0x7b01)return tv.super?uint8_t((xavix_host_input(5)^0x7f)+1):255;
- if(a==0x7b10||a==0x7b11)return 255;
+ if(a==0x7b00||a==0x7b01)return tv.super?0:255;
+ if(a==0x7b10||a==0x7b11)return tv.super?tv.mouse_read(a&1):255;
  if(a==0x7b80)return 255;
  if(a==0x7b81)return tv.random_byte();
  if(tv.super && a>=0x7a10&&a<=0x7a12)return tv.pio_dir[a-0x7a10];
@@ -130,6 +149,7 @@ static uint8_t low_read(uint16_t a) {
 static void low_write(uint16_t a,uint8_t d) {
  if(a==0xfe){cpu.bank=d;return;}
  if(a==0xff){cpu.databank=d;return;}
+ if(tv.super && (a==0x7b10||a==0x7b11)){tv.mouse_clear(a&1);return;}
  if(a>=0x75f0 && a<=0x75ff)xavix_host_audio_sync();
  #include "xavix_write.inc"
  if(tv.super && a>=0x7a10&&a<=0x7a12){tv.pio_dir[a-0x7a10]=d;return;}
@@ -192,8 +212,22 @@ extern "C" void xavix_tv_timer(int id) {
 }
 static bitmap_rgb32 framebuffer;
 extern "C" void xavix_tv_render(unsigned int *pixels,int first,int last) {
+ xavix_output_field=0;
  framebuffer.data=pixels;
  tv.screen_update(tv.screen,framebuffer,rectangle(0,tv.super?511:255,first,last));
+}
+extern "C" void xavix_tv_render_progressive(unsigned int *pixels,int first,int last) {
+ static bitmap_rgb32 field;
+ const int top=first/2,bottom=last/2;
+ for(int parity=0;parity<2;parity++) {
+  xavix_output_field=parity;
+  tv.screen_update(tv.screen,field,rectangle(0,511,top,bottom));
+  for(int y=top;y<=bottom;y++) {
+   int out=y*2+parity;
+   if(out>=first&&out<=last)memcpy(pixels+out*512,&field.pix(y),512*sizeof(*pixels));
+  }
+ }
+ xavix_output_field=0;
 }
 extern "C" void xavix_tv_audio(short **outputs,int samples) {sound_stream stream{samples,outputs};sound.sound_stream_update(stream);}
 extern "C" void xavix_init(void) {xavix_host_save("cpu",&cpu,sizeof(cpu));}
@@ -283,6 +317,7 @@ extern "C" void xavix_tv_register_state(void) {
  SAVE(tv.pio_dir);
  SAVE(tv.super);
  SAVE(tv.random_state);
+ SAVE(tv.mouse_delta);SAVE(tv.mouse_latched);
  SAVE(tv.bitmap_buffer);SAVE(tv.pio_out);SAVE(tv.extraioselect);SAVE(tv.palette.colors);
  SAVE(tv.m_mpd);
  SAVE(tv.m_mad);

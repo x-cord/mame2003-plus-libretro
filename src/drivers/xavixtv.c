@@ -21,8 +21,9 @@ void xavix_host_timer(int id, double delay, double period) {
 void xavix_host_audio_sync(void) { if (xavix_stream >= 0) stream_update(xavix_stream, 0); }
 void xavix_host_video_sync(void) { if (xavix_pixels) force_partial_update(cpu_getscanline()); }
 double xavix_raster_delay(int y, int x) {
- double delay = cpu_getscanlinetime(y & 255);
- delay += cpu_getscanlineperiod() * (x & 255) / 256.0;
+ int scale = xavix_super ? 2 : 1;
+ double delay = cpu_getscanlinetime((y & 255) * scale);
+ delay += cpu_getscanlineperiod() * scale * (x & 255) / 256.0;
  if (delay <= 0) delay += TIME_IN_HZ(60);
  return delay;
 }
@@ -66,13 +67,15 @@ static MACHINE_INIT(xavixtv) {
  state_save_register_func_postload(xavix_postload);
 }
 static VIDEO_START(xavixtv) {
- xavix_pixels=auto_malloc(512*256*sizeof(UINT32));
- memset(xavix_pixels,0,512*256*sizeof(UINT32));
+ int height=xavix_super?512:256;
+ xavix_pixels=auto_malloc(512*height*sizeof(UINT32));
+ memset(xavix_pixels,0,512*height*sizeof(UINT32));
  return 0;
 }
 static VIDEO_UPDATE(xavixtv) {
  int y,x;
- xavix_tv_render(xavix_pixels,cliprect->min_y,cliprect->max_y);
+ if(xavix_super)xavix_tv_render_progressive(xavix_pixels,cliprect->min_y,cliprect->max_y);
+ else xavix_tv_render(xavix_pixels,cliprect->min_y,cliprect->max_y);
  for(y=cliprect->min_y;y<=cliprect->max_y;y++)
   for(x=cliprect->min_x;x<=cliprect->max_x;x++) {
    UINT32 c=xavix_pixels[y*512+x];
@@ -126,11 +129,13 @@ INPUT_PORTS_START(ekara)
 INPUT_PORTS_END
 INPUT_PORTS_START(stvpc)
  PORT_START
- PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
+ /* Conan polls IO0 bit 4 for mouse 1's left button. */
+ PORT_BITX(0x10,IP_ACTIVE_HIGH,IPT_BUTTON1,"Left mouse",KEYCODE_ENTER,JOYCODE_MOUSE_1_BUTTON1)
+ PORT_BIT(0xef,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
- PORT_BITX(0x01,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Select / left mouse",KEYCODE_ENTER,IP_JOY_DEFAULT)
- PORT_BITX(0x02,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Cancel / right mouse",KEYCODE_BACKSPACE,IP_JOY_DEFAULT)
- PORT_BIT(0xfc,IP_ACTIVE_HIGH,IPT_UNUSED)
+ /* IO1 bit 3 is the right button; both inputs are active high. */
+ PORT_BITX(0x08,IP_ACTIVE_HIGH,IPT_BUTTON2,"Right mouse",KEYCODE_BACKSPACE,JOYCODE_MOUSE_1_BUTTON2)
+ PORT_BIT(0xf7,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
  PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
@@ -158,8 +163,9 @@ MACHINE_DRIVER_END
 static MACHINE_DRIVER_START(stvpc)
  MDRV_IMPORT_FROM(ekara)
  MDRV_CPU_REPLACE("main",XAVIX,42954544)
- MDRV_SCREEN_SIZE(512,256)
- MDRV_VISIBLE_AREA(0,511,16,239)
+ MDRV_SCREEN_SIZE(512,512)
+ MDRV_VISIBLE_AREA(0,511,32,479)
+ MDRV_ASPECT_RATIO(4,3)
 MACHINE_DRIVER_END
 
 #define EKARA_BIOS \
