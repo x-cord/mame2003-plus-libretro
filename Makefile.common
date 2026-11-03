@@ -2899,6 +2899,7 @@ SOURCES_C += \
 	$(LIBRETRO_COMM_DIR)/streams/rzip_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/stdin_stream.c \
 	$(LIBRETRO_COMM_DIR)/formats/png/rpng.c \
+	$(LIBRETRO_COMM_DIR)/formats/jpeg/rjpeg.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_pipe.c \
 	$(LIBRETRO_COMM_DIR)/streams/trans_stream_zlib.c \
