@@ -141,7 +141,11 @@ static struct retro_core_option_v2_definition option_def_skip_disclaimer = {
       { "enabled",  NULL },
       { NULL, NULL },
    },
+#ifdef __EMSCRIPTEN__
+   "enabled"
+#else
    "disabled"
+#endif
 };
 
 static struct retro_core_option_v2_definition option_def_skip_warnings = {
@@ -156,7 +160,11 @@ static struct retro_core_option_v2_definition option_def_skip_warnings = {
       { "enabled",  NULL },
       { NULL, NULL },
    },
+#ifdef __EMSCRIPTEN__
+   "enabled"
+#else
    "disabled"
+#endif
 };
 
 static struct retro_core_option_v2_definition option_def_display_setup = {
