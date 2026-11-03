@@ -2887,6 +2887,11 @@ SOURCES_C += $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
 endif
 
 ifeq ($(STATIC_LINKING),1)
+ifneq (,$(findstring emscripten,$(platform)))
+# The BREW driver uses libretro's JPEG decoder, and the EmulatorJS RetroArch
+# link builds with HAVE_RJPEG=0, so compile the decoder into the core here.
+SOURCES_C += $(LIBRETRO_COMM_DIR)/formats/jpeg/rjpeg.c
+endif
 else
 SOURCES_C += \
 	$(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \
