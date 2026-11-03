@@ -11,6 +11,10 @@
 #include <type_traits>
 #include <stddef.h>
 #include "xavix_port.h"
+#include "ekara_microphone.h"
+static EkaraMicrophone ekara_microphone;
+static double (*xavix_emulated_clock)(void)=nullptr;
+extern "C" void xavix_tv_set_clock(double (*clock)(void)) { xavix_emulated_clock=clock; }
 #include "../cpu/xavix_engine.inc"
 static bool xavix_polling_safe=false;
 using u8=uint8_t; using u16=uint16_t; using u32=uint32_t;
@@ -215,7 +219,7 @@ static uint8_t low_read(uint16_t a) {
  #include "xavix_read.inc"
  if(a==0x7b00||a==0x7b01)return tv.super?0:255;
  if(a==0x7b10||a==0x7b11)return tv.super?tv.mouse_read(a&1):255;
- if(a==0x7b80)return 255;
+ if(a==0x7b80)return tv.super?255:tv.ram[0x7b80];
  if(a==0x7b81)return tv.random_byte();
  if(tv.super && a>=0x7a10&&a<=0x7a12)return tv.pio_dir[a-0x7a10];
  if(tv.super && a>=0x7a20&&a<=0x7a22)return tv.pio_out[a-0x7a20];
@@ -230,6 +234,12 @@ static void low_write(uint16_t a,uint8_t d) {
  if(a==0xff){cpu.databank=d;return;}
  if(a<0x4000){tv.ram[a]=d;return;}
  if(tv.super && (a==0x7b10||a==0x7b11)){tv.mouse_clear(a&1);return;}
+ if(!tv.super && a==0x7b81) {
+  tv.ram[a]=d;
+  uint64_t time=xavix_emulated_clock?uint64_t(xavix_emulated_clock()*21477272.0):ekara_microphone.cycles-xavix_ICount;
+  tv.ram[0x7b80]=(d&0x13)==0?ekara_microphone.convert(time):255;
+  return;
+ }
  if(a>=0x75f0 && a<=0x75ff)xavix_host_audio_sync();
  #include "xavix_write.inc"
  if(tv.super && a>=0x7a10&&a<=0x7a12){if(a==0x7a11)stvpc_printer.reset();tv.pio_dir[a-0x7a10]=d;return;}
@@ -274,6 +284,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  stvpc_printer.reset();
  stvpc_keyboard.reset();
  cursor_input=CursorInput{};
+ ekara_microphone.reset();
  new (&tv) XavixTV{};
  tv.super=super;tv.bios=bios;tv.cart=cart;
  tv.m_video_hres_multiplier=super?2:1;
@@ -281,6 +292,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  tv.m_ext_segment_regs=super?tv.ram+0x6a40:nullptr;
  tv.m_sound_regbase=2;
  memset(tv.ram,255,0x4000);
+ tv.ram[0x7b80]=128;
  sound=xavix_sound_device{};
  sound.m_sequencer_rate_hz=21477272/128;
  sound.set_default_tempo(super?0x80:0x40);
@@ -292,6 +304,7 @@ extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
 extern "C" void xavix_tv_input_sync() {
  stvpc_printer.reset();
  stvpc_keyboard.sent_pads[0]=stvpc_keyboard.sent_pads[1]=0xff;
+ ekara_microphone.reset();
 }
 extern "C" void xavix_tv_vblank() {
  if(tv.super) {
@@ -384,6 +397,7 @@ extern "C" int xavix_execute(int cycles) {
   uint8_t registers[offsetof(XavixCPU,special)]{};
  } polling;
  xavix_polling_safe=false;
+ ekara_microphone.cycles+=cycles;
  xavix_ICount=cycles;
  while(xavix_ICount>0) {
   if(cpu.stopped){xavix_ICount=0;break;}
@@ -405,6 +419,7 @@ extern "C" int xavix_execute(int cycles) {
    }
   }
  }
+ ekara_microphone.cycles-=xavix_ICount;
  return cycles-xavix_ICount;
 }
 extern "C" unsigned xavix_get_context(void *p) {if(p)memcpy(p,&cpu,sizeof(cpu));return sizeof(cpu);}
