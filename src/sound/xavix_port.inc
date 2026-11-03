@@ -420,6 +420,12 @@ uint32_t xavix_sound_device::envelope_period_ticks(uint8_t tp) const
 uint32_t xavix_sound_device::voice_envelope_period(int voice) const
 {
 	uint32_t period = envelope_period_ticks(m_tempo_div[voice & 3]);
+	// e-kara's VM3 release (rate register $0a) advances eight times faster
+	// than its buffered VM1 sustain. Keep the sound IRQ and VM1 clocks intact.
+	// Calibrated against GK-1 and SC0007 hardware.
+	if (m_tempo_reset_value == 0x40 && m_voice[voice].env_mode == 3 &&
+		m_readregs_cb(voice * 16 + 9) == 0x0a)
+		period /= 8;
 	return period;
 }
 attotime xavix_sound_device::tempo_period(uint8_t tempo) const
