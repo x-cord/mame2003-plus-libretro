@@ -107,9 +107,7 @@ static DRIVER_INIT(ekara) {xavix_super=0;xavix_tv_set_cart_eeprom(0);}
 static DRIVER_INIT(ekara_eeprom) {xavix_super=0;xavix_tv_set_cart_eeprom(1);}
 static DRIVER_INIT(stvpc) {
  xavix_super=1;
- /* Same EEPROM-error bypass as upstream super_tv_pc_cart.xml. */
- memory_region(REGION_USER2)[0xd5fa]=0xea;
- memory_region(REGION_USER2)[0xd5fb]=0xea;
+ xavix_tv_set_cart_eeprom(1);
 }
 
 const char *xavix_info(void *context,int regnum) {
