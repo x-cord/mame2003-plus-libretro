@@ -68,6 +68,7 @@ static void xavix_postload(void) {
 static MACHINE_INIT(xavixtv) {
  int i;
  for(i=0;i<7;i++)xavix_timers[i]=timer_alloc(xavix_timer_callback);
+ xavix_tv_set_clock(timer_get_time);
  xavix_tv_reset(xavix_super,memory_region(REGION_USER1),memory_region(REGION_USER2));
  xavix_tv_register_state();
  state_save_register_double("xavix",0,"timer remaining",xavix_remaining,xavix_super?7:6);

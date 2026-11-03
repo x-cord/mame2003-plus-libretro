@@ -4,6 +4,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+void xavix_tv_set_clock(double (*clock)(void));
 void xavix_tv_reset(int super, unsigned char *bios, unsigned char *cart);
 unsigned char xavix_tv_read(unsigned address);
 void xavix_tv_write(unsigned address, unsigned char data);
