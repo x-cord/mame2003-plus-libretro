@@ -68,11 +68,13 @@ struct Palette {
  void set_pen_color(int i,int r,int g,int b) {colors[i]=(r<<16)|(g<<8)|b;}
 };
 #include "stvpc_printer.h"
+#include "stvpc_keyboard.h"
+static StvpcKeyboard stvpc_keyboard;
 static StvpcPrinter stvpc_printer;
 static int xavix_output_field = 0;
 static struct CursorInput {
  bool keyboard=false, seen=false;
- int host[2]{}, target[2]{};
+ int host[2]{};
 } cursor_input;
 struct XavixTV {
  #include "xavix_members.inc"
@@ -105,24 +107,26 @@ struct XavixTV {
  void mouse_keys() {
   if(!super)return;
   int x,y;mouse_position(x,y);
-  unsigned arrows=xavix_host_input(2);
-  if(!arrows || mouse_current(0)>255 || mouse_current(1)>255)return;
-  cursor_input.keyboard=true;
-  cursor_input.target[0]=std::clamp(mouse_current(0)+((arrows&2)?4:0)-((arrows&1)?4:0),8,248);
-  cursor_input.target[1]=std::clamp(mouse_current(1)+((arrows&4)?4:0)-((arrows&8)?4:0),24,232);
+  if(xavix_host_input(2))cursor_input.keyboard=true;
  }
  uint8_t mouse_read(int axis) {
   if(!mouse_latched[axis]) {
+   unsigned arrows=xavix_host_input(2);
+   if(arrows)cursor_input.keyboard=true;
    int x=0,y=0;
    bool valid=mouse_position(x,y);
    mouse_delta[axis]=0;
    int current=mouse_current(axis);
    if(current<=255 && (valid || cursor_input.keyboard)) {
-    int target;
-    if(cursor_input.keyboard)
-     target=xavix_host_input(2)?cursor_input.target[axis]:current;
-    else target=axis?std::clamp(y,24,232):std::clamp(x,8,248);
-    mouse_delta[axis]=std::clamp(target-current,-127,127);
+    if(cursor_input.keyboard) {
+     // Read the live direction for this axis, never a target from an older
+     // vblank. An inactive axis must remain still across direction changes.
+     int step=((arrows&(axis?4:2))?5:0)-((arrows&(axis?8:1))?5:0);
+     mouse_delta[axis]=step?std::clamp(current+step,axis?24:8,axis?232:248)-current:0;
+    } else {
+     int target=axis?std::clamp(y,24,232):std::clamp(x,8,248);
+     mouse_delta[axis]=std::clamp(target-current,-127,127);
+    }
    }
    mouse_latched[axis]=true;
   }
@@ -173,7 +177,8 @@ static uint8_t low_read(uint16_t a) {
  if(tv.super && a>=0x7a10&&a<=0x7a12)return tv.pio_dir[a-0x7a10];
  if(tv.super && a>=0x7a20&&a<=0x7a22)return tv.pio_out[a-0x7a20];
  if(tv.super && a==0x7a32)return stvpc_printer.status();
- if(tv.super && a>=0x7a30&&a<=0x7a31)return 0;
+ if(tv.super && a==0x7a30)return stvpc_keyboard.read();
+ if(tv.super && a==0x7a31)return 0;
  return tv.ram[a&0x7fff];
 }
 static void low_write(uint16_t a,uint8_t d) {
@@ -185,7 +190,12 @@ static void low_write(uint16_t a,uint8_t d) {
  if(tv.super && a>=0x7a10&&a<=0x7a12){if(a==0x7a11)stvpc_printer.reset();tv.pio_dir[a-0x7a10]=d;return;}
  if(tv.super && a>=0x7a20&&a<=0x7a22){
   if(a==0x7a21&&(tv.pio_dir[0]&0x20)&&(tv.pio_dir[1]&2))stvpc_printer.clock(tv.pio_out[1],d,tv.pio_out[0]);
-  tv.pio_out[a-0x7a20]=d;return;
+  bool clock=a==0x7a20&&((tv.pio_out[0]^d)&0x40);
+  tv.pio_out[a-0x7a20]=d;
+  // Data-ready must follow the acknowledgement after the ISR has unwound.
+  // Immediate IRQs recursively nest the serial handler and overwrite the stack.
+  if(clock&&stvpc_keyboard.clock())xavix_host_timer(6,0.0001,0);
+  return;
  }
  tv.ram[a&0x7fff]=d;
 }
@@ -216,6 +226,7 @@ static uint8_t xavix_sound_sample_read(unsigned a) {return tv.read_full_data_sp_
 #include <new>
 extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart) {
  stvpc_printer.reset();
+ stvpc_keyboard.reset();
  cursor_input=CursorInput{};
  new (&tv) XavixTV{};
  tv.super=super;tv.bios=bios;tv.cart=cart;
@@ -228,14 +239,33 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  sound.m_sequencer_rate_hz=21477272/128;
  sound.set_default_tempo(super?0x80:0x40);
  sound.device_reset();
- for(int i=0;i<6;i++)xavix_host_timer(i,1e30,0);
+ for(int i=0;i<7;i++)xavix_host_timer(i,1e30,0);
 }
 extern "C" unsigned char xavix_tv_read(unsigned a) {return opcode_read(a);}
 extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
-extern "C" void xavix_tv_input_sync() {stvpc_printer.reset();for(int axis=0;axis<2;axis++)cursor_input.target[axis]=tv.mouse_current(axis);}
-extern "C" void xavix_tv_vblank() {tv.mouse_keys();if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
+extern "C" void xavix_tv_input_sync() {stvpc_printer.reset();}
+extern "C" void xavix_tv_vblank() {
+ if(tv.super) {
+  uint64_t keys=0;
+  for(int i=0;i<8;i++)keys|=uint64_t(xavix_host_input(3+i))<<(i*8);
+  if(xavix_host_input(11)&1)keys|=uint64_t(1)<<2;
+  // The arrow keys also retain their absolute mouse cursor shortcuts.
+  unsigned arrows=xavix_host_input(2);
+  if(arrows&1)keys|=uint64_t(1)<<12;
+  if(arrows&2)keys|=uint64_t(1)<<13;
+  if(arrows&4)keys|=uint64_t(1)<<14;
+  if(arrows&8)keys|=uint64_t(1)<<15;
+  stvpc_keyboard.poll(keys);
+  if((tv.m_ioevent_enable&4)&&!(tv.pio_dir[0]&0x80)&&stvpc_keyboard.start())xavix_host_timer(6,0.0001,0);
+ }
+ tv.mouse_keys();if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
 extern "C" void xavix_tv_timer(int id) {
- if(id==0) {
+ if(id==6) {
+  // MAME's completed one-shot retains its old expiry. Disarm it explicitly
+  // so save/load cannot re-arm a stale data-ready edge ahead of a new packet.
+  xavix_host_timer(6,1e30,0);
+  if(tv.super && stvpc_keyboard.active)tv.process_ioevent(4);
+ } else if(id==0) {
   if(tv.m_video_ctrl&16){tv.m_video_ctrl|=64;tv.m_irqsource|=64;tv.update_irqs();xavix_host_video_sync();}
   tv.m_interrupt_timer->adjust(tv.m_screen->time_until_pos(tv.m_posirq_y[0],tv.m_posirq_x[0]));
  } else if(id==1) {
@@ -296,6 +326,14 @@ extern "C" unsigned xavix_dasm(char *s,unsigned pc) {sprintf(s,"$%02x",opcode_re
 extern "C" void xavix_tv_register_state(void) {
 #define SAVE(v) xavix_host_save(#v,&(v),sizeof(v))
 
+ // The controller can be mid-packet at a frame boundary. Preserve the wire
+ // and pending edges so restoring a state cannot manufacture or stick keys.
+ if(tv.super) {
+  SAVE(stvpc_keyboard.held);SAVE(stvpc_keyboard.queue);
+  SAVE(stvpc_keyboard.head);SAVE(stvpc_keyboard.tail);
+  SAVE(stvpc_keyboard.packet);SAVE(stvpc_keyboard.remaining);
+  SAVE(stvpc_keyboard.data);SAVE(stvpc_keyboard.sampled);SAVE(stvpc_keyboard.active);
+ }
  SAVE(tv.m_ioevent_enable);
  SAVE(tv.m_ioevent_active);
  SAVE(tv.m_io0_data);
