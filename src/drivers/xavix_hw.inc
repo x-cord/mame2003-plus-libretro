@@ -1077,6 +1077,7 @@ void XavixTV::draw_sprites_line(screen_device &screen, bitmap_rgb32 &bitmap, con
 		ypos += 128 + 1;
 
 		ypos += ypos_adjust;
+		if (i < 16) ypos += logo_sprite_y_adjust;
 
 		int spritelowy = ypos;
 		int spritehighy = ypos + drawheight;

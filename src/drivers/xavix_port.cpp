@@ -92,6 +92,16 @@ struct XavixTV {
  #include "xavix_decls.inc"
  uint8_t *regular_coverage=nullptr;
  const uint8_t *bitmap_coverage=nullptr;
+ int logo_sprite_y_adjust=0;
+ bool logo_second_phase() const {
+  if(!super || (m_spritereg&0x7f)!=4)return false;
+  for(int i=0;i<16;i++) {
+   const unsigned tile=m_fragment_sprite[0x500+i]|(m_fragment_sprite[0x600+i]<<8)|(m_fragment_sprite[0x700+i]<<16);
+   if((m_fragment_sprite[i]&0xfe)!=6 || m_fragment_sprite[0x100+i]!=0x2c ||
+      tile<0x3dd500 || tile>0x3dff80 || (tile&0x7f))return false;
+  }
+  return true;
+ }
  void bitmap_row(bitmap_rgb32 &bitmap,const rectangle &clip,int y,int left,int right,int bpp,int z,int multiplier) {
   auto pixels=&bitmap.pix(y);auto priorities=&m_zbuffer.pix(y);
   const auto covered=bitmap_coverage?bitmap_coverage+y*512:nullptr;
@@ -399,14 +409,15 @@ extern "C" void xavix_tv_render_progressive(unsigned int *pixels,int first,int l
  static bitmap_rgb32 field,regular;
  static uint16_t depth[512*256];
  static uint8_t coverage[512*256];
- // Super XaviX produces a complete frame at 60 Hz. Render each sprite once
- // from its current graphics address and attributes for both row phases.
+ const bool offset_logo=tv.logo_second_phase();
  const int first_row=first/2,last_row=last/2;
  rectangle clip;
  int saved_address=0,saved_bit=0,saved_cache=0;
  for(int parity=0;parity<2;parity++) {
   const int top=first/2+((first&1)>parity),bottom=last/2-((last&1)<parity);
-  if(!parity) {
+  // Moving odd output rows up one logical row shifts the sprite by one output pixel.
+  tv.logo_sprite_y_adjust=offset_logo&&parity?-1:0;
+  if(!parity||offset_logo) {
    clip=tv.do_arena(tv.screen,regular,rectangle(0,511,first_row,last_row));
    memset(coverage+first_row*512,0,(last_row-first_row+1)*512);
    tv.regular_coverage=coverage;
@@ -430,6 +441,7 @@ extern "C" void xavix_tv_render_progressive(unsigned int *pixels,int first,int l
   }
  }
  tv.bitmap_coverage=nullptr;
+ tv.logo_sprite_y_adjust=0;
  tv.m_tmp_dataaddress=saved_address;tv.m_tmp_databit=saved_bit;tv.m_bit=saved_cache;
  xavix_output_row_phase=0;
 }

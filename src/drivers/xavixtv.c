@@ -109,9 +109,6 @@ static DRIVER_INIT(stvpc) {
  /* Same EEPROM-error bypass as upstream super_tv_pc_cart.xml. */
  memory_region(REGION_USER2)[0xd5fa]=0xea;
  memory_region(REGION_USER2)[0xd5fb]=0xea;
- /* Keep the startup logo on its first source-phase animation table. */
- memory_region(REGION_USER2)[0x8f4d]=0xea;
- memory_region(REGION_USER2)[0x8f4e]=0xea;
 }
 
 const char *xavix_info(void *context,int regnum) {
