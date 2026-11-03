@@ -216,15 +216,11 @@ static WRITE32_HANDLER( beena_pal_w )
 	beena_requested_fiq = 1;
 }
 
-static UINT32 beena_dbg_px;
-static int beena_frame;
-
 static void beena_put(struct mame_bitmap *bitmap, const struct rectangle *clip, int x, int y, UINT16 color)
 {
 	if (x < 0 || x >= bitmap->width || y < 0 || y >= bitmap->height) return;
 	if (clip && (x < clip->min_x || x > clip->max_x || y < clip->min_y || y > clip->max_y)) return;
 	*BITMAP_ADDR16(bitmap, y, x) = color;
-	beena_dbg_px++;
 }
 
 /* One 16x16 8bpp tile (linear, 256 bytes), scaled by beena_scale, with a
@@ -240,6 +236,36 @@ static void beena_draw_tile(struct mame_bitmap *bitmap, const struct rectangle *
 {
 	const UINT8 *src = tiledata + tile_idx * 256;
 	int x, y, px, py;
+	int min_x = clip->min_x > 0 ? clip->min_x : 0;
+	int min_y = clip->min_y > 0 ? clip->min_y : 0;
+	int max_x = clip->max_x < bitmap->width - 1 ? clip->max_x : bitmap->width - 1;
+	int max_y = clip->max_y < bitmap->height - 1 ? clip->max_y : bitmap->height - 1;
+	int size = 16 * beena_scale;
+	if (dx > max_x || dy > max_y || dx + size <= min_x || dy + size <= min_y) return;
+
+	if (dx >= min_x && dy >= min_y && dx + size - 1 <= max_x && dy + size - 1 <= max_y) {
+		const UINT16 *palette = use_scanline_pal ? beena_pal_cache + (dy / beena_scale) * 0x100 : beena_pal_base;
+		for (y = 0; y < 16; y++) {
+			const UINT8 *row = src + (fy ? 15 - y : y) * 16;
+			UINT16 *dst = (UINT16 *)bitmap->line[dy + y * beena_scale] + dx;
+			if (beena_scale == 1) {
+				for (x = 0; x < 16; x++) {
+					UINT8 p = row[(fx ? 15 - x : x) ^ 3];
+					if (p) dst[x] = palette[p] ? palette[p] : beena_pal_base[p];
+				}
+			} else {
+				UINT16 *dst2 = (UINT16 *)bitmap->line[dy + y * 2 + 1] + dx;
+				for (x = 0; x < 16; x++) {
+					UINT8 p = row[(fx ? 15 - x : x) ^ 3];
+					if (p) {
+						UINT16 color = palette[p] ? palette[p] : beena_pal_base[p];
+						dst[x * 2] = dst[x * 2 + 1] = dst2[x * 2] = dst2[x * 2 + 1] = color;
+					}
+				}
+			}
+		}
+		return;
+	}
 
 	for (y = 0; y < 16; y++) {
 		int ry = fy ? (15 - y) : y;
@@ -468,7 +494,7 @@ static void beena_draw_bitmap(struct mame_bitmap *bitmap, const struct rectangle
 	UINT16 *bmp;
 	UINT32 i;
 	UINT16 w, h, ox, oy, sx, sy, cw, ch;
-	UINT32 y, x;
+	int y, x, first_x, first_y, last_x, last_y, min_x, min_y, max_x, max_y;
 
 	if ((beena_video_regs[0x20/4] & 1) == 0)
 		return;
@@ -483,20 +509,40 @@ static void beena_draw_bitmap(struct mame_bitmap *bitmap, const struct rectangle
 	cw = (beena_video_regs[0x2c/4] >> 0)  & 0x3ff;
 	ch = (beena_video_regs[0x2c/4] >> 16) & 0x3ff;
 
-	i = oy * w + ox;
-	for (y = 0; y < (UINT32)h; y++) {
-		for (x = 0; x < (UINT32)w; x++) {
+	min_x = cliprect->min_x > 0 ? cliprect->min_x : 0;
+	min_y = cliprect->min_y > 0 ? cliprect->min_y : 0;
+	max_x = cliprect->max_x < bitmap->width - 1 ? cliprect->max_x : bitmap->width - 1;
+	max_y = cliprect->max_y < bitmap->height - 1 ? cliprect->max_y : bitmap->height - 1;
+	first_x = min_x / beena_scale - sx;
+	first_y = min_y / beena_scale - sy;
+	if (first_x < 0) first_x = 0;
+	if (first_y < 0) first_y = 0;
+	last_x = (w < cw ? w : cw) - 1;
+	last_y = (h < ch ? h : ch) - 1;
+	if (last_x > max_x / beena_scale - sx) last_x = max_x / beena_scale - sx;
+	if (last_y > max_y / beena_scale - sy) last_y = max_y / beena_scale - sy;
+	if (first_x > last_x || first_y > last_y) return;
+	for (y = first_y; y <= last_y; y++) {
+		int dy = (y + sy) * beena_scale;
+		int end_x = last_x;
+		UINT16 *dst = (UINT16 *)bitmap->line[dy];
+		i = (y + oy) * w + ox + first_x;
+		if (i >= 0xc6000 / 2) return;
+		if (end_x - first_x >= 0xc6000 / 2 - i) end_x = first_x + 0xc6000 / 2 - i - 1;
+		for (x = first_x; x <= end_x; x++, i++) {
 			UINT16 color = bmp[BYTE_XOR_BE(i)];
-			int dx, dy, yy, xx;
-			i++;
-			if (color == 0 || y >= ch || x >= cw)
-				continue;
-			dy = ((int)y + sy) * beena_scale;
-			dx = ((int)x + sx) * beena_scale;
-			for (yy = 0; yy < beena_scale; yy++)
-				for (xx = 0; xx < beena_scale; xx++)
-					beena_put(bitmap, cliprect,
-							dx + xx, dy + yy, BGR555_TO_RGB555(color));
+			int dx = (x + sx) * beena_scale;
+			if (color == 0) continue;
+			color = BGR555_TO_RGB555(color);
+			if (beena_scale == 1) dst[dx] = color;
+			else if (dx >= min_x && dx + 1 <= max_x && dy >= min_y && dy + 1 <= max_y) {
+				UINT16 *dst2 = (UINT16 *)bitmap->line[dy + 1];
+				dst[dx] = dst[dx + 1] = dst2[dx] = dst2[dx + 1] = color;
+			} else {
+				int yy, xx;
+				for (yy = 0; yy < 2; yy++)
+					for (xx = 0; xx < 2; xx++) beena_put(bitmap, cliprect, dx + xx, dy + yy, color);
+			}
 		}
 	}
 }
@@ -529,18 +575,31 @@ static UINT16 beena_blend_px(UINT16 dst, int bl_r, int bl_g, int bl_b, int a_r, 
 
 static void beena_screen_blend(struct mame_bitmap *bitmap, const struct rectangle *clip)
 {
-	UINT32 r30 = beena_video_regs[0x30/4];
-	int a_r = beena_rescale_alpha_step((r30 >> 0)  & 0x3f);
-	int a_g = beena_rescale_alpha_step((r30 >> 8)  & 0x3f);
-	int a_b = beena_rescale_alpha_step((r30 >> 16) & 0x3f);
-	int bl_r = (((r30 >> 0)  & 0x3f) < 0x20) ? 0xff : 0;
-	int bl_g = (((r30 >> 8)  & 0x3f) < 0x20) ? 0xff : 0;
-	int bl_b = (((r30 >> 16) & 0x3f) < 0x20) ? 0xff : 0;
+	static UINT16 red[32], green[32], blue[32];
+	static UINT32 cached = 0xffffffff;
+	UINT32 r30 = beena_video_regs[0x30/4] & 0x003f3f3f;
 	int y, x;
+	if (r30 == 0) return;
+	if (cached != r30) {
+		int a_r = beena_rescale_alpha_step((r30 >> 0)  & 0x3f);
+		int a_g = beena_rescale_alpha_step((r30 >> 8)  & 0x3f);
+		int a_b = beena_rescale_alpha_step((r30 >> 16) & 0x3f);
+		int bl_r = (((r30 >> 0)  & 0x3f) < 0x20) ? 0xff : 0;
+		int bl_g = (((r30 >> 8)  & 0x3f) < 0x20) ? 0xff : 0;
+		int bl_b = (((r30 >> 16) & 0x3f) < 0x20) ? 0xff : 0;
+		for (x = 0; x < 32; x++) {
+			red[x] = beena_blend_px(x << 10, bl_r, bl_g, bl_b, a_r, a_g, a_b) & 0x7c00;
+			green[x] = beena_blend_px(x << 5, bl_r, bl_g, bl_b, a_r, a_g, a_b) & 0x03e0;
+			blue[x] = beena_blend_px(x, bl_r, bl_g, bl_b, a_r, a_g, a_b) & 0x001f;
+		}
+		cached = r30;
+	}
 	for (y = clip->min_y; y <= clip->max_y; y++) {
 		UINT16 *line = (UINT16 *)bitmap->line[y];
-		for (x = clip->min_x; x <= clip->max_x; x++)
-			line[x] = beena_blend_px(line[x], bl_r, bl_g, bl_b, a_r, a_g, a_b);
+		for (x = clip->min_x; x <= clip->max_x; x++) {
+			UINT16 color = line[x];
+			line[x] = red[(color >> 10) & 31] | green[(color >> 5) & 31] | blue[color & 31];
+		}
 	}
 }
 
@@ -559,10 +618,8 @@ static VIDEO_UPDATE( beena )
 	UINT16 *line;
 	int i, y;
 
-	beena_frame++;
 	beena_pal_base[0] = 0;
 	fillbitmap(bitmap, 0, cliprect);
-	beena_dbg_px = 0;
 
 	if ((beena_video_regs[0x10/4] & 1) == 0) {
 		beena_screen_blend(bitmap, cliprect);
