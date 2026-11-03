@@ -16,7 +16,9 @@
 /* rjpeg.c asks libretro-common for host CPU features; the native MAME build
    does not link features_cpu.c, and the decoder works without SIMD. The
    EmulatorJS link already provides features_cpu.o from RetroArch. */
+#ifndef __EMSCRIPTEN__
 uint64_t cpu_features_get(void) { return 0; }
+#endif
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
