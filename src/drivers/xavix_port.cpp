@@ -150,9 +150,11 @@ struct EkaraI2C {
  }
 };
 static EkaraI2C ekara_i2c;
-static bool ekara_cart_has_eeprom = false;
-extern "C" void xavix_tv_set_cart_eeprom(int enable) { ekara_cart_has_eeprom = (enable != 0); }
+static bool xavix_cart_has_eeprom = false;
+extern "C" void xavix_tv_set_cart_eeprom(int enable) { xavix_cart_has_eeprom = (enable != 0); }
 extern "C" unsigned char *ekara_eeprom_data(void) { return ekara_i2c.data; }
+static EkaraI2C stvpc_i2c;
+extern "C" unsigned char *stvpc_eeprom_data(void) { return stvpc_i2c.data; }
 static double (*xavix_emulated_clock)(void)=nullptr;
 extern "C" void xavix_tv_set_clock(double (*clock)(void)) { xavix_emulated_clock=clock; }
 static uint8_t *xavix_ram_ptr = nullptr;
@@ -381,6 +383,28 @@ static bool ekara_effect_icon(int tile,int bpp,int pal) {
 }
 #include "xavix_hw.inc"
 
+static void stvpc_update_i2c() {
+ int sda = 1;
+ int scl = 0;
+ if(tv.pio_dir[2] & 0x40) {
+  sda = (tv.pio_out[2] >> 6) & 1;
+ } else if(tv.pio_dir[2] & 0x20) {
+  sda = (tv.pio_out[2] >> 5) & 1;
+ }
+ if(tv.pio_dir[2] & 0x80) {
+  scl = (tv.pio_out[2] >> 7) & 1;
+ } else if(tv.pio_dir[2] & 0x10) {
+  scl = (tv.pio_out[2] >> 4) & 1;
+ }
+ if(stvpc_i2c.scl && !scl) {
+  stvpc_i2c.write_scl(scl);
+  stvpc_i2c.write_sda(sda);
+ } else {
+  stvpc_i2c.write_sda(sda);
+  stvpc_i2c.write_scl(scl);
+ }
+}
+
 static uint8_t low_read(uint16_t a) {
  if(a<0x4000)return tv.ram[a];
  xavix_polling_safe=false;
@@ -391,7 +415,11 @@ static uint8_t low_read(uint16_t a) {
  if(a==0x7b81)return tv.random_byte();
  if(tv.super && a>=0x7a10&&a<=0x7a12)return tv.pio_dir[a-0x7a10];
  if(tv.super && a>=0x7a20&&a<=0x7a22)return tv.pio_out[a-0x7a20];
- if(tv.super && a==0x7a32)return stvpc_printer.status();
+ if(tv.super && a==0x7a32) {
+  uint8_t in = stvpc_printer.status();
+  if(xavix_cart_has_eeprom && stvpc_i2c.read_sda()) in |= 0x40 | 0x20;
+  return (tv.pio_out[2] & tv.pio_dir[2]) | (in & ~tv.pio_dir[2]);
+ }
  if(tv.super && a==0x7a30)return stvpc_keyboard.read();
  if(tv.super && a==0x7a31)return 0;
  return tv.ram[a&0x7fff];
@@ -410,11 +438,17 @@ static void low_write(uint16_t a,uint8_t d) {
  }
  if(a>=0x75f0 && a<=0x75ff)xavix_host_audio_sync();
  #include "xavix_write.inc"
- if(tv.super && a>=0x7a10&&a<=0x7a12){if(a==0x7a11)stvpc_printer.reset();tv.pio_dir[a-0x7a10]=d;return;}
+ if(tv.super && a>=0x7a10&&a<=0x7a12){
+  if(a==0x7a11)stvpc_printer.reset();
+  tv.pio_dir[a-0x7a10]=d;
+  if(xavix_cart_has_eeprom && a==0x7a12)stvpc_update_i2c();
+  return;
+ }
  if(tv.super && a>=0x7a20&&a<=0x7a22){
   if(a==0x7a21&&(tv.pio_dir[0]&0x20)&&(tv.pio_dir[1]&2))stvpc_printer.clock(tv.pio_out[1],d,tv.pio_out[0]);
   bool clock=a==0x7a20&&((tv.pio_out[0]^d)&0x40);
   tv.pio_out[a-0x7a20]=d;
+  if(xavix_cart_has_eeprom && a==0x7a22)stvpc_update_i2c();
   // Data-ready must follow the acknowledgement after the ISR has unwound.
   // Immediate IRQs recursively nest the serial handler and overwrite the stack.
   if(clock&&stvpc_keyboard.clock())xavix_host_timer(6,0.0001,0);
@@ -430,7 +464,7 @@ static uint8_t ext_read(uint32_t a) {
   if(a>=0x500000&&a<=0x5fffff && (tv.pio_dir[2]&tv.pio_out[2]&4))a+=0x200000;
   return tv.bios[a];
  }
- if(ekara_cart_has_eeprom && a==0x5fffff && (tv.m_extbusctrl[1]&8))return ekara_i2c.read_sda() ? 255 : 0;
+ if(xavix_cart_has_eeprom && a==0x5fffff && (tv.m_extbusctrl[1]&8))return ekara_i2c.read_sda() ? 255 : 0;
  // GK-1's unpopulated peripheral bus leaves the serial data line high.
  if(ekara_effect_profile==3 && a==0x5fffff && (tv.m_extbusctrl[1]&8))return 255;
  if(a<0x600000)return tv.cart[a&0x1fffff];
@@ -440,7 +474,7 @@ static void ext_write(uint32_t a,uint8_t d) {
  xavix_polling_safe=false;
  a&=0x7fffff;
  if(tv.super && a>=0x600000&&a<=0x67ffff)tv.bitmap_buffer[a-0x600000]=d;
- if(!tv.super && ekara_cart_has_eeprom && a==0x3fffff && (tv.m_extbusctrl[1]&0x04)) {
+ if(!tv.super && xavix_cart_has_eeprom && a==0x3fffff && (tv.m_extbusctrl[1]&0x04)) {
   ekara_i2c.write_sda(d&1);
   ekara_i2c.write_scl((d>>1)&1);
  }
@@ -466,6 +500,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  cursor_input=CursorInput{};
  ekara_microphone.reset();
  ekara_i2c.reset();
+ stvpc_i2c.reset();
  new (&tv) XavixTV{};
  xavix_ram_ptr=tv.ram;
  tv.super=super;tv.bios=bios;tv.cart=cart;
@@ -647,7 +682,7 @@ extern "C" unsigned xavix_dasm(char *s,unsigned pc) {sprintf(s,"$%02x",opcode_re
 extern "C" void xavix_tv_register_state(void) {
 #define SAVE(v) xavix_host_save(#v,&(v),sizeof(v))
  if(ekara_effect_profile==3) SAVE(ekara_effect_hardware);
- if(ekara_cart_has_eeprom) {
+ if(!tv.super && xavix_cart_has_eeprom) {
   SAVE(ekara_i2c.data);
   SAVE(ekara_i2c.page);
   SAVE(ekara_i2c.scl);
@@ -665,6 +700,20 @@ extern "C" void xavix_tv_register_state(void) {
  // The controller can be mid-packet at a frame boundary. Preserve the wire
  // and pending edges so restoring a state cannot manufacture or stick keys.
  if(tv.super) {
+  if(xavix_cart_has_eeprom) {
+   SAVE(stvpc_i2c.data);
+   SAVE(stvpc_i2c.page);
+   SAVE(stvpc_i2c.scl);
+   SAVE(stvpc_i2c.sdaw);
+   SAVE(stvpc_i2c.sdar);
+   SAVE(stvpc_i2c.state);
+   SAVE(stvpc_i2c.bits);
+   SAVE(stvpc_i2c.shift);
+   SAVE(stvpc_i2c.devsel);
+   SAVE(stvpc_i2c.byteaddr);
+   SAVE(stvpc_i2c.page_offset);
+   SAVE(stvpc_i2c.page_written);
+  }
   SAVE(stvpc_keyboard.held);SAVE(stvpc_keyboard.queue);
   SAVE(stvpc_keyboard.head);SAVE(stvpc_keyboard.tail);
   SAVE(stvpc_keyboard.packet);SAVE(stvpc_keyboard.remaining);
