@@ -28,6 +28,14 @@ double xavix_raster_delay(int y, int x) {
  return delay;
 }
 UINT8 xavix_host_input(int port) { return readinputport(port); }
+int xavix_host_pointer(int *x, int *y) {
+ int px, py;
+ if (!osd_pointer_position(&px, &py)) return 0;
+ *x = ((px + 32767) * 255 + 32767) / 65534;
+ /* Firmware mouse Y increases upward; the visible screen spans rows 16-239. */
+ *y = 240 - ((py + 32767) * 223 + 32767) / 65534;
+ return 1;
+}
 void xavix_host_save(const char *name, void *data, unsigned bytes) { state_save_register_UINT8("xavix", 0, name, data, bytes); }
 static void xavix_audio_callback(int param, INT16 **out, int samples) { xavix_tv_audio(out, samples); }
 static int xavix_sound_start(const struct MachineSound *msound) {
@@ -54,6 +62,7 @@ static void xavix_presave(void) {
 }
 static void xavix_postload(void) {
  int i;
+ xavix_tv_input_sync();
  for(i=0;i<6;i++)timer_adjust(xavix_timers[i],xavix_remaining[i],i,xavix_period[i]);
 }
 static MACHINE_INIT(xavixtv) {
@@ -137,13 +146,17 @@ INPUT_PORTS_START(stvpc)
  PORT_BITX(0x08,IP_ACTIVE_HIGH,IPT_BUTTON2,"Right mouse",KEYCODE_BACKSPACE,JOYCODE_MOUSE_1_BUTTON2)
  PORT_BIT(0xf7,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
- PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
+ PORT_BITX(0x01,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Cursor left",KEYCODE_LEFT,IP_JOY_NONE)
+ PORT_BITX(0x02,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Cursor right",KEYCODE_RIGHT,IP_JOY_NONE)
+ PORT_BITX(0x04,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Cursor up",KEYCODE_UP,IP_JOY_NONE)
+ PORT_BITX(0x08,IP_ACTIVE_HIGH,IPT_KEYBOARD,"Cursor down",KEYCODE_DOWN,IP_JOY_NONE)
+ PORT_BIT(0xf0,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
  PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
- PORT_ANALOG(0xff,0,IPT_TRACKBALL_X|IPF_REVERSE,25,32,0,255)
+ PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
  PORT_START
- PORT_ANALOG(0xff,0,IPT_TRACKBALL_Y,25,32,0,255)
+ PORT_BIT(0xff,IP_ACTIVE_HIGH,IPT_UNUSED)
 INPUT_PORTS_END
 static MACHINE_DRIVER_START(ekara)
  MDRV_CPU_ADD_TAG("main",XAVIX,21477272)

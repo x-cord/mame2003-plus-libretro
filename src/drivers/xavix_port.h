@@ -8,6 +8,7 @@ void xavix_tv_reset(int super, unsigned char *bios, unsigned char *cart);
 unsigned char xavix_tv_read(unsigned address);
 void xavix_tv_write(unsigned address, unsigned char data);
 void xavix_tv_vblank(void);
+void xavix_tv_input_sync(void);
 void xavix_tv_timer(int id);
 void xavix_tv_render(unsigned int *pixels, int first, int last);
 void xavix_tv_render_progressive(unsigned int *pixels, int first, int last);
@@ -18,6 +19,7 @@ void xavix_host_timer(int id, double delay, double period);
 void xavix_host_audio_sync(void);
 void xavix_host_video_sync(void);
 unsigned char xavix_host_input(int port);
+int xavix_host_pointer(int *x, int *y);
 void xavix_host_save(const char *name, void *data, unsigned bytes);
 #ifdef __cplusplus
 }
