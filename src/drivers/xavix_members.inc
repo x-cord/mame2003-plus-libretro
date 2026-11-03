@@ -85,3 +85,6 @@ screen_device screen;
 screen_device *m_screen=&screen;
 xavix_sound_device *m_sound=&sound;
 Timer irq_timer{0}; Timer *m_interrupt_timer=&irq_timer;
+// Read/clear movement latches for mouse 1.
+int16_t mouse_delta[2]{};
+bool mouse_latched[2]{};

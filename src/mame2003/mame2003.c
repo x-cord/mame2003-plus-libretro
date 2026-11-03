@@ -1463,6 +1463,16 @@ void osd_joystick_end_calibration(void) { }
 
 ******************************************************************************/
 
+int osd_pointer_position(int *x, int *y)
+{
+  if (options.xy_device != RETRO_DEVICE_POINTER ||
+      input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_IS_OFFSCREEN))
+    return 0;
+  *x = input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+  *y = input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+  return *x >= -32767 && *y >= -32767;
+}
+
 void osd_xy_device_read(int player, int *deltax, int *deltay, const char* type)
 {
   /* return zero when no device is set */

@@ -68,6 +68,10 @@ struct Palette {
  void set_pen_color(int i,int r,int g,int b) {colors[i]=(r<<16)|(g<<8)|b;}
 };
 static int xavix_output_field = 0;
+static struct CursorInput {
+ bool keyboard=false, seen=false;
+ int host[2]{}, target[2]{};
+} cursor_input;
 struct XavixTV {
  #include "xavix_members.inc"
  #include "xavix_decls.inc"
@@ -83,17 +87,40 @@ struct XavixTV {
   if(a<0x400) {uint8_t v=a;return ((a&0x200)?((~v>>4)&15):(v>>4))|((a&0x100)?(~v<<4):(v<<4));}
   return m_txarray[(a-0x400)/0x400];
  }
+ bool mouse_position(int &x,int &y) {
+  bool valid=xavix_host_pointer(&x,&y)!=0;
+  if(valid) {
+   if((!cursor_input.seen || x!=cursor_input.host[0] || y!=cursor_input.host[1]) && !xavix_host_input(2))
+    cursor_input.keyboard=false;
+   cursor_input.host[0]=x;cursor_input.host[1]=y;cursor_input.seen=true;
+  }
+  return valid;
+ }
+ int mouse_current(int axis) {
+  unsigned address=0x2bf7+axis*2;
+  return ram[address]|(ram[address+1]<<8);
+ }
+ void mouse_keys() {
+  if(!super)return;
+  int x,y;mouse_position(x,y);
+  unsigned arrows=xavix_host_input(2);
+  if(!arrows || mouse_current(0)>255 || mouse_current(1)>255)return;
+  cursor_input.keyboard=true;
+  cursor_input.target[0]=std::clamp(mouse_current(0)+((arrows&2)?4:0)-((arrows&1)?4:0),8,248);
+  cursor_input.target[1]=std::clamp(mouse_current(1)+((arrows&4)?4:0)-((arrows&8)?4:0),24,232);
+ }
  uint8_t mouse_read(int axis) {
   if(!mouse_latched[axis]) {
-   int x,y;
+   int x=0,y=0;
+   bool valid=mouse_position(x,y);
    mouse_delta[axis]=0;
-   if(xavix_host_pointer(&x,&y)) {
-    int target=axis?std::clamp(y,24,232):std::clamp(x,8,248);
-    // Conan's firmware mouse coordinates also reflect menu warps and restores.
-    unsigned address=0x2bf7+axis*2;
-    int current=ram[address]|(ram[address+1]<<8);
-    if(current>=0 && current<=255)
-     mouse_delta[axis]=std::clamp(target-current,-127,127);
+   int current=mouse_current(axis);
+   if(current<=255 && (valid || cursor_input.keyboard)) {
+    int target;
+    if(cursor_input.keyboard)
+     target=xavix_host_input(2)?cursor_input.target[axis]:current;
+    else target=axis?std::clamp(y,24,232):std::clamp(x,8,248);
+    mouse_delta[axis]=std::clamp(target-current,-127,127);
    }
    mouse_latched[axis]=true;
   }
@@ -182,6 +209,7 @@ static uint8_t xavix_sound_sample_read(unsigned a) {return tv.read_full_data_sp_
 
 #include <new>
 extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart) {
+ cursor_input=CursorInput{};
  new (&tv) XavixTV{};
  tv.super=super;tv.bios=bios;tv.cart=cart;
  tv.m_video_hres_multiplier=super?2:1;
@@ -197,7 +225,8 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
 }
 extern "C" unsigned char xavix_tv_read(unsigned a) {return opcode_read(a);}
 extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
-extern "C" void xavix_tv_vblank() {if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
+extern "C" void xavix_tv_input_sync() {for(int axis=0;axis<2;axis++)cursor_input.target[axis]=tv.mouse_current(axis);}
+extern "C" void xavix_tv_vblank() {tv.mouse_keys();if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
 extern "C" void xavix_tv_timer(int id) {
  if(id==0) {
   if(tv.m_video_ctrl&16){tv.m_video_ctrl|=64;tv.m_irqsource|=64;tv.update_irqs();xavix_host_video_sync();}
