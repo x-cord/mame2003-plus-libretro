@@ -280,6 +280,8 @@ static uint8_t ext_read(uint32_t a) {
   if(a>=0x500000&&a<=0x5fffff && (tv.pio_dir[2]&tv.pio_out[2]&4))a+=0x200000;
   return tv.bios[a];
  }
+ // GK-1's unpopulated peripheral bus leaves the serial data line high.
+ if(ekara_effect_profile==3 && a==0x5fffff && (tv.m_extbusctrl[1]&8))return 255;
  if(a<0x600000)return tv.cart[a&0x1fffff];
  return tv.bios[(a-0x600000)&0xfffff];
 }
