@@ -12,6 +12,7 @@
 ***************************************************************************/
 
 #include "driver.h"
+#include "state.h"
 #include "cpu/arm7be/arm7be.h"
 
 #include <time.h>
@@ -59,6 +60,57 @@ static UINT8  beena_scale;
 static UINT16 beena_scanline;
 static UINT32 beena_pen_target;
 static UINT32 beena_effective_page;
+static UINT8 beena_selected_page, beena_page_keys;
+static UINT8 beena_pen_keys;
+static INT32 beena_book_x = -1, beena_book_y = -1;
+static int beena_book_contact;
+
+static int beena_book_positions(void)
+{
+	return !strcmp(Machine->gamedrv->name, "beena_conan") ? 6 : 7;
+}
+
+static void beena_update_pen_target(void)
+{
+	UINT8 key = readinputport(4) & 2;
+	if (key != beena_pen_keys) beena_pen_target ^= 1;
+	beena_pen_keys = key;
+}
+
+
+static void beena_release_book_pen(void)
+{
+	beena_book_x = beena_book_y = -1;
+	beena_book_contact = 0;
+}
+
+static void beena_restore_book_pen(void)
+{
+	beena_book_contact = 0;
+	beena_selected_page %= beena_book_positions();
+}
+
+/* Page and pen keyboard input share the positions used by the frontend. */
+static void beena_update_page(void)
+{
+	UINT8 keys = readinputport(5);
+	UINT8 pressed = keys & ~beena_page_keys;
+	int positions = beena_book_positions();
+	UINT8 arrows = readinputport(11);
+	if (pressed & 1) beena_selected_page = (beena_selected_page + positions - 1) % positions;
+	if (pressed & 2) beena_selected_page = (beena_selected_page + 1) % positions;
+	beena_page_keys = keys;
+	if (arrows) {
+		if (beena_book_x < 0) beena_book_x = readinputport(6) & 0xff;
+		if (beena_book_y < 0) beena_book_y = readinputport(7) & 0xff;
+		beena_book_x += ((arrows & 2) ? 4 : 0) - ((arrows & 1) ? 4 : 0);
+		beena_book_y += ((arrows & 8) ? 4 : 0) - ((arrows & 4) ? 4 : 0);
+		if (beena_book_x < 0) beena_book_x = 0;
+		if (beena_book_x > 255) beena_book_x = 255;
+		if (beena_book_y < 0) beena_book_y = 0;
+		if (beena_book_y > 255) beena_book_y = 255;
+	}
+}
 static UINT8  beena_requested_fiq;
 static UINT32 beena_irq_wait_start_addr;
 static UINT32 beena_vbl_count;
@@ -561,9 +613,9 @@ static void beena_update_sensors(UINT32 offset)
 
 	switch (offset) {
 		case 0x8/4: case 0xc/4: case 0x10/4:
-			io_pen_x = readinputport(6) & 0xff; /* PENX */
-			io_pen_y = readinputport(7) & 0xff; /* PENY */
-			beena_pen_target = (readinputport(4) & 2) ? 1 : 0;
+			io_pen_x = beena_book_x >= 0 ? beena_book_x : (readinputport(6) & 0xff);
+			io_pen_y = beena_book_y >= 0 ? beena_book_y : (readinputport(7) & 0xff);
+			beena_update_pen_target();
 			is_tablet = (beena_pen_target == 0);
 			if (is_tablet) {
 				io_pen_x = 0x1b8 + (((io_pen_x - io_pen_x_min) * (0x58 - 0x1b8)) / (io_pen_x_max - io_pen_x_min));
@@ -572,19 +624,19 @@ static void beena_update_sensors(UINT32 offset)
 				io_pen_x = 0x1b6 + (((io_pen_x - (io_pen_x_min + 8)) * (0x109 - 0x1b6)) / ((io_pen_x_max - 8) - (io_pen_x_min + 8)));
 				io_pen_y = 0x3b8 + (((io_pen_y - (io_pen_y_min + 8)) * (0x342 - 0x3b8)) / (io_pen_y_max - (io_pen_y_min + 8)));
 			}
-			pen_pressed = (readinputport(4) & 1) ? 0x80000 : 0;
+			pen_pressed = (beena_book_contact || (readinputport(4) & 1)) ? 0x80000 : 0;
 			pen_data = (io_pen_y << 9) | io_pen_x | pen_pressed;
 			beena_sensor_regs[offset] = pen_data;
 			break;
 		case 0x2c/4:
-			io_page = readinputport(5) & 0x0f;
+			io_page = beena_selected_page;
 			if (is_test_mode) {
 				/* Forced pages 1/3/5 covered, others exposed. */
 				beena_sensor_regs[offset] = 0xff00ff00;
 				beena_effective_page = 6;
 			} else if ((beena_effective_page ^ io_page) != 0) {
 				beena_effective_page = io_page;
-				beena_sensor_regs[offset] = (0xffffffffu >> (beena_effective_page * 8));
+				beena_sensor_regs[offset] = (UINT32)((UINT64)0xffffffff >> (beena_effective_page * 8));
 			}
 			break;
 		case 0x30/4:
@@ -811,6 +863,7 @@ static void beena_irq_wait_speedup(void)
 static void beena_scanline_callback(int param)
 {
 	UINT8 irq_frequency = readinputport(9) & 0xf; /* CPU_CONFIG */
+	if (param == 0) beena_update_page();
 	beena_irq_wait_speedup();
 	if (irq_frequency == 0) irq_frequency = 1;
 	beena_scanline = param / beena_scale;
@@ -1051,17 +1104,19 @@ INPUT_PORTS_START( beena )
 	PORT_BIT( 0xff, IP_ACTIVE_LOW, IPT_UNUSED )
 
 	PORT_START /* PEN_LEFT: bit0 = pen button, bit1 = pen target toggle */
-	PORT_BIT( 0x01, IP_ACTIVE_HIGH, IPT_BUTTON3 )
-	PORT_BIT( 0x02, IP_ACTIVE_HIGH, IPT_BUTTON4 )
+	PORT_BITX( 0x01, IP_ACTIVE_HIGH, IPT_BUTTON3, "Pen Button", KEYCODE_SPACE, JOYCODE_1_BUTTON3 )
+	PORT_BITX( 0x02, IP_ACTIVE_HIGH, IPT_BUTTON4 | IPF_TOGGLE, "Pen Target (Tablet / Book)", KEYCODE_LSHIFT, JOYCODE_1_BUTTON4 )
 
 	PORT_START /* PAGE: 7-position, Home/End */
-	PORT_ANALOGX( 0x0f, 0x00, IPT_DIAL, 10, 1, 0, 6, KEYCODE_HOME, KEYCODE_END, IP_JOY_NONE, IP_JOY_NONE )
+	PORT_BITX( 0x01, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Previous Book Page", KEYCODE_HOME, IP_JOY_NONE )
+	PORT_BITX( 0x02, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Next Book Page", KEYCODE_END, IP_JOY_NONE )
 
+	/* Keep pointer and keyboard coordinates in the same screen units. */
 	PORT_START /* PENX */
-	PORT_ANALOGX( 0xff, 0x80, IPT_LIGHTGUN_X, 30, 4, 0, 255, KEYCODE_LEFT, KEYCODE_RIGHT, IP_JOY_NONE, IP_JOY_NONE )
+	PORT_ANALOGX( 0xff, 0x80, IPT_LIGHTGUN_X, 100, 4, 0, 255, IP_KEY_NONE, IP_KEY_NONE, IP_JOY_NONE, IP_JOY_NONE )
 
 	PORT_START /* PENY */
-	PORT_ANALOGX( 0xff, 0x80, IPT_LIGHTGUN_Y, 30, 4, 0, 255, KEYCODE_UP, KEYCODE_DOWN, IP_JOY_NONE, IP_JOY_NONE )
+	PORT_ANALOGX( 0xff, 0x80, IPT_LIGHTGUN_Y, 100, 4, 0, 255, IP_KEY_NONE, IP_KEY_NONE, IP_JOY_NONE, IP_JOY_NONE )
 
 	/* Machine configurations, mirroring upstream's CPU_CONFIG /
 	   VIDEO_CONFIG / PAGE_CONFIG (0.78 has no PORT_CONFNAME). */
@@ -1088,6 +1143,12 @@ INPUT_PORTS_START( beena )
 	PORT_DIPNAME( 0x80, 0x80, "Test Mode Pages" )
 	PORT_DIPSETTING( 0x00, DEF_STR( On ) )
 	PORT_DIPSETTING( 0x80, DEF_STR( Off ) )
+
+	PORT_START /* 11: keyboard pen movement */
+	PORT_BITX( 0x01, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Pen Left", KEYCODE_LEFT, IP_JOY_NONE )
+	PORT_BITX( 0x02, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Pen Right", KEYCODE_RIGHT, IP_JOY_NONE )
+	PORT_BITX( 0x04, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Pen Up", KEYCODE_UP, IP_JOY_NONE )
+	PORT_BITX( 0x08, IP_ACTIVE_HIGH, IPT_KEYBOARD, "Pen Down", KEYCODE_DOWN, IP_JOY_NONE )
 INPUT_PORTS_END
 
 /* ----------------------------------------------------------------------- */
@@ -1167,7 +1228,11 @@ static MACHINE_INIT( beena )
 	beena_sensor_regs[0x2c/4] = 0xffffffff;
 	beena_sensor_regs[0x30/4] = 0x00ffffff;
 	beena_pen_target = 0;
+	beena_pen_keys = 0;
+	beena_release_book_pen();
 	beena_effective_page = 0;
+	beena_selected_page = 0;
+	beena_page_keys = 0;
 	beena_mc_addr = 0; beena_mc_data = 0; beena_mc_i = 0;
 	beena_mc_seq = BITS_EMPTY; beena_mc_state = IDLE;
 	beena_fsa_size = 0; beena_fsa_head = 0; beena_fsa_tail = 0;
@@ -1196,7 +1261,18 @@ static MACHINE_DRIVER_START( beena )
 	MDRV_VIDEO_UPDATE(beena)
 MACHINE_DRIVER_END
 
-static DRIVER_INIT( beena ) { beena_init(); }
+static DRIVER_INIT( beena )
+{
+	beena_init();
+	state_save_register_UINT8("beena", 0, "selected_page", &beena_selected_page, 1);
+	state_save_register_UINT8("beena", 0, "page_keys", &beena_page_keys, 1);
+	state_save_register_UINT32("beena", 0, "effective_page", &beena_effective_page, 1);
+	state_save_register_UINT32("beena", 0, "pen_target", &beena_pen_target, 1);
+	state_save_register_UINT8("beena", 0, "pen_keys", &beena_pen_keys, 1);
+	state_save_register_INT32("beena", 0, "pen_x", &beena_book_x, 1);
+	state_save_register_INT32("beena", 0, "pen_y", &beena_book_y, 1);
+	state_save_register_func_postload(beena_restore_book_pen);
+}
 
 GAME( 2005, beena,       0, beena, beena, beena, ROT0, "Sega Toys", "Advanced Pico BEENA" )
 GAME( 2006, beena_conan, 0, beena, beena, beena, ROT0, "Sega Toys", "Meitantei Conan: Kanzen Suiri! Kazu to Zukei no Nazo (Sega Beena)" )
