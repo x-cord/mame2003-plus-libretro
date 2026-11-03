@@ -333,6 +333,7 @@ extern "C" void xavix_tv_register_state(void) {
   SAVE(stvpc_keyboard.head);SAVE(stvpc_keyboard.tail);
   SAVE(stvpc_keyboard.packet);SAVE(stvpc_keyboard.remaining);
   SAVE(stvpc_keyboard.data);SAVE(stvpc_keyboard.sampled);SAVE(stvpc_keyboard.active);
+  SAVE(stvpc_keyboard.rtc_wait);
  }
  SAVE(tv.m_ioevent_enable);
  SAVE(tv.m_ioevent_active);
