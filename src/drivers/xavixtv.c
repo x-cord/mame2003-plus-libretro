@@ -2,6 +2,7 @@
  * XaviX e-kara / Super XaviX Super TV-PC, adapted from current MAME.
  * Upstream copyright-holders: David Haywood, Olivier Galibert, ramacat.
  */
+#include <string.h>
 #include "driver.h"
 #include "state.h"
 #include "cpu/xavix/xavix.h"
@@ -65,6 +66,11 @@ static void xavix_postload(void) {
  xavix_tv_input_sync();
  for(i=0;i<7;i++)timer_adjust(xavix_timers[i],xavix_remaining[i],i,xavix_period[i]);
 }
+static const char *ekara_driver_name(void) {
+ return (Machine && Machine->gamedrv) ? Machine->gamedrv->name : "";
+}
+
+
 static MACHINE_INIT(xavixtv) {
  int i;
  for(i=0;i<7;i++)xavix_timers[i]=timer_alloc(xavix_timer_callback);
