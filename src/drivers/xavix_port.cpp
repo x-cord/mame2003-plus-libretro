@@ -15,8 +15,8 @@
 static EkaraMicrophone ekara_microphone;
 static double (*xavix_emulated_clock)(void)=nullptr;
 extern "C" void xavix_tv_set_clock(double (*clock)(void)) { xavix_emulated_clock=clock; }
+static uint8_t *xavix_ram_ptr = nullptr;
 #include "../cpu/xavix_engine.inc"
-static bool xavix_polling_safe=false;
 using u8=uint8_t; using u16=uint16_t; using u32=uint32_t;
 using s8=int8_t; using s16=int16_t; using s32=int32_t;
 using offs_t=uint32_t; using pen_t=uint32_t;
@@ -301,11 +301,12 @@ static void ext_write(uint32_t a,uint8_t d) {
  if(tv.super && a>=0x600000&&a<=0x67ffff)tv.bitmap_buffer[a-0x600000]=d;
 }
 static uint8_t opcode_read(uint32_t a) {
- if(ekara_effect_song()) {
-  unsigned patch=ekara_effect_profile==1?0xd94b:0xc6cf;
-  if(a==patch || a==patch+1) return 0xea;
+ unsigned patch=ekara_effect_profile==1?0xd94b:0xc6cf;
+ if((a==patch || a==patch+1) && ekara_effect_song())return 0xea;
+ if(!(a&0x800000)&&!(a&0x8000)) {
+  if(a<0x4000)return tv.ram[a];
+  return low_read(a&0x7fff);
  }
- if(!(a&0x800000)&&!(a&0x8000))return low_read(a&0x7fff);
  return ext_read(a&0x7fffff);
 }
 static int vector_read(int which,int half) {return tv.get_vectors(which,half);}
@@ -320,6 +321,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
  cursor_input=CursorInput{};
  ekara_microphone.reset();
  new (&tv) XavixTV{};
+ xavix_ram_ptr=tv.ram;
  tv.super=super;tv.bios=bios;tv.cart=cart;
  ekara_effect_profile=0;ekara_effect_hardware=EkaraEffectState{};
  if(!super && cart[0xd94b]==0x85 && cart[0xd94c]==0x76 && cart[0xd974]==0xa5 && cart[0xd975]==0x46) ekara_effect_profile=1;

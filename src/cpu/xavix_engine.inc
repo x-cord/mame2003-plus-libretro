@@ -14,6 +14,7 @@ static uint8_t ext_read(uint32_t);
 static void ext_write(uint32_t, uint8_t);
 static uint8_t opcode_read(uint32_t);
 static int vector_read(int, int);
+static bool xavix_polling_safe = false;
 struct XavixCPU {
  uint16_t m_PC, m_SP, m_TMP, m_PPC;
  uint8_t m_TMP2, m_A, m_X, m_Y, m_P, bank, databank, prevbank;
@@ -34,13 +35,23 @@ struct XavixCPU {
  uint8_t read_full_data(uint32_t a) { return read_full_data(a>>16,a); }
  uint8_t read_full_data(uint8_t b,uint16_t a) {
   --xavix_ICount;
-  if(b<128 && a<0x8000) { if(a==0xfe) return bank; if(a==0xff) return databank; return low_read(a); }
+  if(b<128 && a<0x8000) {
+   if(a==0xfe) return bank;
+   if(a==0xff) return databank;
+   if(a<0x4000) return xavix_ram_ptr[a];
+   return low_read(a);
+  }
   return ext_read(((b<<16)|a)&0x7fffff);
  }
  void write_full_data(uint32_t a,uint8_t v) { write_full_data(a>>16,a,v); }
  void write_full_data(uint8_t b,uint16_t a,uint8_t v) {
   --xavix_ICount;
-  if(b<128 && a<0x8000) { if(a==0xfe) bank=v; else if(a==0xff) databank=v; else low_write(a,v); }
+  if(b<128 && a<0x8000) {
+   if(a==0xfe) { bank=v; return; }
+   if(a==0xff) { databank=v; return; }
+   if(a<0x4000) { xavix_ram_ptr[a]=v; xavix_polling_safe=false; return; }
+   low_write(a,v);
+  }
   else ext_write(((b<<16)|a)&0x7fffff,v);
  }
  uint8_t read(uint16_t a) { return read_full_data(databank,a); }
@@ -48,10 +59,22 @@ struct XavixCPU {
  uint8_t read_arg(uint16_t a) { --xavix_ICount; return opcode_read((bank<<16)|a); }
  uint8_t read_pc() { return read_arg(m_PC); }
  uint8_t read_pc_noirq() { return read_pc(); }
- uint8_t read_zeropage(uint32_t a) { --xavix_ICount; if((a&255)==254) return bank; if((a&255)==255) return databank; return low_read(a&255); }
- void write_zeropage(uint32_t a,uint8_t v) { --xavix_ICount; if((a&255)==254) bank=v; else if((a&255)==255) databank=v; else low_write(a&255,v); }
- uint8_t read_stack(uint32_t a) { --xavix_ICount; return low_read(0x100|(a&255)); }
- void write_stack(uint32_t a,uint8_t v) { --xavix_ICount; low_write(0x100|(a&255),v); }
+ uint8_t read_zeropage(uint32_t a) {
+  --xavix_ICount;
+  uint8_t zp = a & 255;
+  if(zp < 254) return xavix_ram_ptr[zp];
+  if(zp == 254) return bank;
+  return databank;
+ }
+ void write_zeropage(uint32_t a,uint8_t v) {
+  --xavix_ICount;
+  uint8_t zp = a & 255;
+  if(zp < 254) { xavix_ram_ptr[zp] = v; xavix_polling_safe = false; return; }
+  if(zp == 254) bank = v;
+  else databank = v;
+ }
+ uint8_t read_stack(uint32_t a) { --xavix_ICount; return xavix_ram_ptr[0x100|(a&255)]; }
+ void write_stack(uint32_t a,uint8_t v) { --xavix_ICount; xavix_ram_ptr[0x100|(a&255)] = v; xavix_polling_safe = false; }
  void write_special_stack(uint32_t a,uint8_t v) { if(super) write_stack(a,v); else special[specialpos]=v; }
  uint8_t read_special_stack(uint32_t a) { return super?read_stack(a):special[specialpos]; }
  void dec_special_stack() { if(super) dec_SP(); else specialpos--; }
