@@ -1,14 +1,19 @@
 // license:BSD-3-Clause
 #include <stdint.h>
+#include <time.h>
 
 // Super TV-PC keyboard/RTC serial bus. The host supplies physical key states;
 // the firmware receives its normal six-bit scan codes and make/break bit.
+// The same controller carries the real-time clock: a four-byte time packet is
+// sent as four prefixed bytes (011/010/001/000) separated by one idle bit,
+// which the firmware's decoder consumes before each channel prefix.
 struct StvpcKeyboard {
  uint64_t held=0;
  uint8_t queue[128]{}, head=0, tail=0;
- unsigned packet=0, remaining=0;
+ uint64_t packet=0; unsigned remaining=0;
  uint8_t data=0;
  bool sampled=false, active=false;
+ int rtc_wait=60;
  uint8_t read() {sampled=true;return data;}
  bool clock() {if(!sampled)return false;sampled=false;if(!remaining){active=false;return false;}return advance();}
  void reset() {*this=StvpcKeyboard{};}
@@ -27,10 +32,38 @@ struct StvpcKeyboard {
   }
  }
  bool start() {
-  if(active||head==tail)return false;
+  if(active)return false;
+  if(head==tail)return rtc_start();
   active=true;sampled=false;
   // Prefix 110 selects the key channel, followed by seven bits, MSB first.
   packet=(6<<7)|queue[head];head=(head+1)&127;remaining=10;
+  return advance();
+ }
+ // Queue the current wall-clock time when the firmware is due for an update.
+ bool rtc_start() {
+  if(rtc_wait>0){rtc_wait--;return false;}
+  rtc_wait=60;
+  time_t now=time(nullptr);
+  struct tm *t=localtime(&now);
+  if(!t)return false;
+  int year=t->tm_year+1900-2000;
+  int month=t->tm_mon+1;
+  uint8_t bytes[4]={
+   uint8_t((t->tm_sec&0x3f)|((t->tm_min&3)<<6)),
+   uint8_t(((t->tm_min>>2)&0x0f)|((t->tm_hour&0x0f)<<4)),
+   uint8_t(((t->tm_hour>>4)&1)|((t->tm_mday&0x1f)<<1)|((month&3)<<6)),
+   uint8_t(((month>>2)&3)|((year&0x3f)<<2))};
+  // Bytes travel in reverse order: 011 then 010 then 001 then 000. Every
+  // byte is followed by an idle bit, which the firmware's decoder consumes
+  // before the next channel prefix and which leaves it armed again.
+  uint64_t bits=0;unsigned count=0;
+  for(int i=0;i<4;i++) {
+   int prefix=3-i;
+   bits=(bits<<3)|prefix;count+=3;
+   bits=(bits<<8)|bytes[3-i];count+=8;
+   bits=(bits<<1);count++;
+  }
+  packet=bits;remaining=count;active=true;sampled=false;
   return advance();
  }
  bool advance() {
