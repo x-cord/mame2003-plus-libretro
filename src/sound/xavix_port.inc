@@ -23,6 +23,7 @@ void xavix_sound_device::device_reset()
 {
 	// hardware default on init
 	m_cyclerate_div = 0x0f;
+	refresh_env_period_cache();
 
 	// TODO: on tempo group (tp[0..3]) defaults:
 	// - On reset the hardware tempo registers power up as 0x00. When tp==0, the tempo
@@ -79,19 +80,20 @@ void xavix_sound_device::sound_stream_update(sound_stream &stream)
 	const uint8_t cap = m_mix.capacity & 0x03;
 	const int allowed_channels = (cap & 0x02) ? 4 : (cap & 0x01) ? 8 : 16;
 	const int amp = int(m_mix.gain);
+	const int32_t mastervol = m_mix.mastervol;
 	// Post-mix gain uses a 3/128 factor for the hardware divider.
-	const int64_t gain_factor = int64_t(amp) * int64_t(allowed_channels) * 3;
+	const int32_t gain_factor = int32_t(amp) * int32_t(allowed_channels) * 3;
 
-	auto apply_final_gain = [gain_factor](int64_t x) -> int64_t
+	auto apply_final_gain = [gain_factor](int32_t x) -> int32_t
 	{
-		int64_t y = x * gain_factor;
+		int32_t y = x * gain_factor;
 		return (y >= 0) ? ((y + 64) >> 7) : -(((-y) + 64) >> 7);
 	};
 
 	while (num_samples-- != 0)
 	{
-		int64_t total_l = 0;
-		int64_t total_r = 0;
+		int32_t total_l = 0;
+		int32_t total_r = 0;
 
 		// visit voices in the observed hardware order; drop anything past the capacity window
 		for (int idx = 0; idx < allowed_channels; idx++)
@@ -160,17 +162,15 @@ void xavix_sound_device::sound_stream_update(sound_stream &stream)
 
 			// per-voice + master + envelope
 			const int32_t gn   = (m_voice[v].vol & 0x0f);
-			const int32_t mvol = m_mix.mastervol;
 			const int32_t env_l = m_voice[v].env_vol_left;
 			const int32_t env_r = m_voice[v].env_vol_right;
 
-			const int64_t base = int64_t(sample) * int64_t(gn);
+			const int32_t base = sample * gn;
 
-			int64_t left  = (base * int64_t(mvol)) / 255;
-			int64_t right = (base * int64_t(mvol)) / 255;
+			const int32_t scaled = (base * mastervol) / 255;
 
-			total_l += (left  * int64_t(env_l)) / 255;
-			total_r += (right * int64_t(env_r)) / 255;
+			total_l += (scaled * env_l) / 255;
+			total_r += (scaled * env_r) / 255;
 
 			// advance voice state
 			m_voice[v].position += phase_step_per_tick(m_voice[v].rate);
@@ -417,9 +417,17 @@ uint32_t xavix_sound_device::envelope_period_ticks(uint8_t tp) const
 	const uint64_t scaled = uint64_t(base) * 16u;      // envelope cadence
 	return uint32_t(scaled > 64'000'000u ? 64'000'000u : scaled);
 }
-uint32_t xavix_sound_device::voice_envelope_period(int voice) const
+void xavix_sound_device::refresh_env_period_cache()
 {
-	uint32_t period = envelope_period_ticks(m_tempo_div[voice & 3]);
+	for (int tp = 0; tp < 256; tp++)
+		m_env_period_cache[tp] = envelope_period_ticks(uint8_t(tp));
+	m_env_cache_cyclerate = m_cyclerate_div;
+}
+uint32_t xavix_sound_device::voice_envelope_period(int voice)
+{
+	if (m_env_cache_cyclerate != m_cyclerate_div)
+		refresh_env_period_cache();
+	uint32_t period = m_env_period_cache[m_tempo_div[voice & 3]];
 	// e-kara's VM3 release (rate register $0a) advances eight times faster
 	// than its buffered VM1 sustain. Keep the sound IRQ and VM1 clocks intact.
 	// Calibrated against GK-1 and SC0007 hardware.
@@ -482,6 +490,8 @@ void xavix_sound_device::set_cyclerate(uint8_t value)
 
 	m_cyclerate_div = value;
  (void)0;
+
+	refresh_env_period_cache();
 
 	// Recompute per-voice periods
 	for (int v = 0; v < 16; v++)

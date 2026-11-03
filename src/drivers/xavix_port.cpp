@@ -255,38 +255,162 @@ struct XavixTV {
   const auto covered=bitmap_coverage?bitmap_coverage+y*512:nullptr;
   const unsigned mask=(1u<<bpp)-1;
   const int per_byte=8/bpp;
-  while(left<right) {
-   int count=std::min(per_byte,right-left);
-   unsigned packed=graphics_bits(count*bpp,m_extra!=nullptr);
-   for(int i=0;i<count;i++,left++) {
-    unsigned pen=packed&mask;packed>>=bpp;
-    if((m_bmp_palram_sh[pen]&31)>=24)continue;
-    int x=left*multiplier;
-    const int end=std::min(x+multiplier-1,clip.max_x);
-    for(int pixel=std::max(x,clip.min_x);pixel<=end;pixel++) {
-     if(z>priorities[pixel]||(z==priorities[pixel]&&(!covered||!covered[pixel]))) {
-      pixels[pixel]=palette.colors[256+pen];priorities[pixel]=z;
-     }
+  const bool sx=m_extra!=nullptr;
+  const uint8_t *const palram=m_bmp_palram_sh;
+  const uint32_t *const colors=palette.colors+256;
+  const int clip_min=clip.min_x,clip_max=clip.max_x;
+  const bool must_clip=!(left*multiplier>=clip_min&&(right-1)*multiplier+multiplier-1<=clip_max);
+  auto put=[&](int col,unsigned pen) {
+   if((palram[pen]&31)>=24)return;
+   if(multiplier==1) {
+    if(must_clip&&(col<clip_min||col>clip_max))return;
+    if(z>priorities[col]||(z==priorities[col]&&(!covered||!covered[col]))) {
+     pixels[col]=colors[pen];priorities[col]=z;
     }
+    return;
+   }
+   int x=col*multiplier;
+   int end=x+multiplier-1;
+   if(end<clip_min||x>clip_max)return;
+   if(x<clip_min)x=clip_min;
+   if(end>clip_max)end=clip_max;
+   const uint32_t color=colors[pen];
+   for(int pixel=x;pixel<=end;pixel++) {
+    if(z>priorities[pixel]||(z==priorities[pixel]&&(!covered||!covered[pixel]))) {
+     pixels[pixel]=color;priorities[pixel]=z;
+    }
+   }
+  };
+  const bool byte_aligned=(bpp==1||bpp==2||bpp==4||bpp==8);
+  if(byte_aligned&&!m_tmp_databit) {
+   if(per_byte==2) {
+    while(right-left>=2) {
+     uint8_t dat=read_graphics_byte(sx);
+     put(left,dat&mask);++left;
+     put(left,(dat>>bpp)&mask);++left;
+    }
+   } else if(per_byte==4) {
+    while(right-left>=4) {
+     uint8_t dat=read_graphics_byte(sx);
+     put(left,dat&mask);++left;
+     put(left,(dat>>bpp)&mask);++left;
+     put(left,(dat>>(bpp*2))&mask);++left;
+     put(left,(dat>>(bpp*3))&mask);++left;
+    }
+   } else if(per_byte==8) {
+    while(right-left>=8) {
+     uint8_t dat=read_graphics_byte(sx);
+     put(left,dat&mask);++left;
+     put(left,(dat>>bpp)&mask);++left;
+     put(left,(dat>>(bpp*2))&mask);++left;
+     put(left,(dat>>(bpp*3))&mask);++left;
+     put(left,(dat>>(bpp*4))&mask);++left;
+     put(left,(dat>>(bpp*5))&mask);++left;
+     put(left,(dat>>(bpp*6))&mask);++left;
+     put(left,(dat>>(bpp*7))&mask);++left;
+    }
+   } else {
+    while(left<right) {
+     uint8_t dat=read_graphics_byte(sx);
+     put(left,dat&mask);++left;
+    }
+   }
+  }
+  while(left<right) {
+   int count=right-left<per_byte?right-left:per_byte;
+   unsigned packed=graphics_bits(count*bpp,sx);
+   for(int i=0;i<count;i++) {
+    put(left,packed&mask);packed>>=bpp;++left;
    }
   }
  }
  uint8_t graphics_bits(int count,bool sx) {
+  if(count<=8) {
+   if(!m_tmp_databit) m_bit=peek_graphics_byte(sx);
+   const int avail=8-m_tmp_databit;
+   if(count<=avail) {
+    const unsigned value=(m_bit>>m_tmp_databit)&((1u<<count)-1);
+    m_tmp_databit+=count;
+    if(m_tmp_databit==8){m_tmp_databit=0;m_tmp_dataaddress++;}
+    return uint8_t(value);
+   }
+  }
   unsigned value=0,shift=0;
   while(count>0) {
-   if(!m_tmp_databit) {
-    int address=m_tmp_dataaddress;
-    if(sx) {
-     if(address&0x2000000){address&=0x1ffffff;address^=0x600000;}
-     m_bit=((address&0x1000000)&&m_extra)?m_extra[address&0x7fffff]:read_full_data_sp_bypass(address);
-    } else m_bit=m_disable_memory_bypass?opcode_read(address):read_full_data_sp_bypass(address);
-   }
+   if(!m_tmp_databit) m_bit=peek_graphics_byte(sx);
    int take=std::min(count,8-m_tmp_databit);
    value|=((m_bit>>m_tmp_databit)&((1u<<take)-1))<<shift;
    m_tmp_databit+=take;count-=take;shift+=take;
    if(m_tmp_databit==8){m_tmp_databit=0;m_tmp_dataaddress++;}
   }
   return value;
+ }
+ __attribute__((always_inline)) uint8_t peek_graphics_byte(bool sx) {
+  int address=m_tmp_dataaddress;
+  if(sx) {
+   if(address&0x2000000){address&=0x1ffffff;address^=0x600000;}
+   if((address&0x1000000)&&m_extra) m_bit=m_extra[address&0x7fffff];
+   else if(address&0x800000) {
+    const unsigned e=address&0x7fffff;
+    if(super) {
+     if(e>=0x600000&&e<=0x67ffff) m_bit=bitmap_buffer[e-0x600000];
+     else if(e<0x400000) m_bit=cart[e];
+     else m_bit=ext_read(e);
+    } else m_bit=ext_read(e);
+   } else m_bit=read_full_data_sp_bypass(address);
+  } else m_bit=m_disable_memory_bypass?opcode_read(address):read_full_data_sp_bypass(address);
+  return m_bit;
+ }
+ __attribute__((always_inline)) uint8_t read_graphics_byte(bool sx) {
+  const uint8_t dat=peek_graphics_byte(sx);
+  m_tmp_dataaddress++;
+  return dat;
+ }
+ void read_tile_pixels(uint8_t *out,int count,int bpp,bool sx) {
+  const unsigned mask=(1u<<bpp)-1;
+  const int per_byte=8/bpp;
+  int left=0;
+  if((bpp==1||bpp==2||bpp==4||bpp==8)&&!m_tmp_databit) {
+   if(per_byte==2) {
+    while(count>=2) {
+     uint8_t dat=read_graphics_byte(sx);
+     out[left++]=dat&mask;
+     out[left++]=(dat>>bpp)&mask;
+     count-=2;
+    }
+   } else if(per_byte==4) {
+    while(count>=4) {
+     uint8_t dat=read_graphics_byte(sx);
+     out[left++]=dat&mask;
+     out[left++]=(dat>>bpp)&mask;
+     out[left++]=(dat>>(bpp*2))&mask;
+     out[left++]=(dat>>(bpp*3))&mask;
+     count-=4;
+    }
+   } else if(per_byte==8) {
+    while(count>=8) {
+     uint8_t dat=read_graphics_byte(sx);
+     out[left++]=dat&mask;
+     out[left++]=(dat>>bpp)&mask;
+     out[left++]=(dat>>(bpp*2))&mask;
+     out[left++]=(dat>>(bpp*3))&mask;
+     out[left++]=(dat>>(bpp*4))&mask;
+     out[left++]=(dat>>(bpp*5))&mask;
+     out[left++]=(dat>>(bpp*6))&mask;
+     out[left++]=(dat>>(bpp*7))&mask;
+     count-=8;
+    }
+   } else {
+    while(count>0) {
+     out[left++]=read_graphics_byte(sx)&mask;
+     count--;
+    }
+   }
+  }
+  while(count>0) {
+   out[left++]=uint8_t(graphics_bits(bpp,sx));
+   count--;
+  }
  }
  uint8_t read_full_data_sp_bypass(uint32_t a) {
   if((a&0x800000)||(a&0x8000))return ext_read(a&0x7fffff);

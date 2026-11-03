@@ -34,7 +34,7 @@ public:
 	double tempo_tick_hz(uint8_t tempo) const;
 	uint32_t  phase_step_per_tick(uint32_t rate) const;
 	uint32_t envelope_period_ticks(uint8_t tp) const;
-	uint32_t voice_envelope_period(int voice) const;
+	uint32_t voice_envelope_period(int voice);
 
 	void set_default_tempo(uint8_t tempo) { m_tempo_reset_value = tempo; }
 
@@ -107,6 +107,8 @@ public:
 	uint8_t m_tempo_div[4] = { 0, 0, 0, 0 };
 	uint8_t m_cyclerate_div = 1;
 	uint32_t m_sequencer_rate_hz;
+	uint32_t m_env_period_cache[256]{};
+	uint8_t m_env_cache_cyclerate = 0xff;
 
 	// callbacks
 	uint8_t (*m_readregs_cb)(unsigned) = xavix_sound_reg_read;
@@ -117,6 +119,7 @@ public:
 	xavix_voice m_voice[16];
 
 	// helpers
+	void refresh_env_period_cache();
 	uint32_t tempo_to_period_ticks(uint8_t tp) const;
 	uint8_t decay(uint8_t x);
 	void step_pitch(int voice);
