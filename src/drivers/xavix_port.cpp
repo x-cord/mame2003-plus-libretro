@@ -67,6 +67,8 @@ struct Palette {
  unsigned black_pen() const {return 0;}
  void set_pen_color(int i,int r,int g,int b) {colors[i]=(r<<16)|(g<<8)|b;}
 };
+#include "stvpc_printer.h"
+static StvpcPrinter stvpc_printer;
 static int xavix_output_field = 0;
 static struct CursorInput {
  bool keyboard=false, seen=false;
@@ -170,7 +172,8 @@ static uint8_t low_read(uint16_t a) {
  if(a==0x7b81)return tv.random_byte();
  if(tv.super && a>=0x7a10&&a<=0x7a12)return tv.pio_dir[a-0x7a10];
  if(tv.super && a>=0x7a20&&a<=0x7a22)return tv.pio_out[a-0x7a20];
- if(tv.super && a>=0x7a30&&a<=0x7a32)return 0;
+ if(tv.super && a==0x7a32)return stvpc_printer.status();
+ if(tv.super && a>=0x7a30&&a<=0x7a31)return 0;
  return tv.ram[a&0x7fff];
 }
 static void low_write(uint16_t a,uint8_t d) {
@@ -179,8 +182,11 @@ static void low_write(uint16_t a,uint8_t d) {
  if(tv.super && (a==0x7b10||a==0x7b11)){tv.mouse_clear(a&1);return;}
  if(a>=0x75f0 && a<=0x75ff)xavix_host_audio_sync();
  #include "xavix_write.inc"
- if(tv.super && a>=0x7a10&&a<=0x7a12){tv.pio_dir[a-0x7a10]=d;return;}
- if(tv.super && a>=0x7a20&&a<=0x7a22){tv.pio_out[a-0x7a20]=d;return;}
+ if(tv.super && a>=0x7a10&&a<=0x7a12){if(a==0x7a11)stvpc_printer.reset();tv.pio_dir[a-0x7a10]=d;return;}
+ if(tv.super && a>=0x7a20&&a<=0x7a22){
+  if(a==0x7a21&&(tv.pio_dir[0]&0x20)&&(tv.pio_dir[1]&2))stvpc_printer.clock(tv.pio_out[1],d,tv.pio_out[0]);
+  tv.pio_out[a-0x7a20]=d;return;
+ }
  tv.ram[a&0x7fff]=d;
 }
 static uint8_t ext_read(uint32_t a) {
@@ -209,6 +215,7 @@ static uint8_t xavix_sound_sample_read(unsigned a) {return tv.read_full_data_sp_
 
 #include <new>
 extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart) {
+ stvpc_printer.reset();
  cursor_input=CursorInput{};
  new (&tv) XavixTV{};
  tv.super=super;tv.bios=bios;tv.cart=cart;
@@ -225,7 +232,7 @@ extern "C" void xavix_tv_reset(int super,unsigned char *bios,unsigned char *cart
 }
 extern "C" unsigned char xavix_tv_read(unsigned a) {return opcode_read(a);}
 extern "C" void xavix_tv_write(unsigned a,unsigned char d) {tv.full_write(a,d);}
-extern "C" void xavix_tv_input_sync() {for(int axis=0;axis<2;axis++)cursor_input.target[axis]=tv.mouse_current(axis);}
+extern "C" void xavix_tv_input_sync() {stvpc_printer.reset();for(int axis=0;axis<2;axis++)cursor_input.target[axis]=tv.mouse_current(axis);}
 extern "C" void xavix_tv_vblank() {tv.mouse_keys();if(tv.m_video_ctrl&0x20){tv.raise_nmi();tv.m_video_ctrl|=0x80;}}
 extern "C" void xavix_tv_timer(int id) {
  if(id==0) {
